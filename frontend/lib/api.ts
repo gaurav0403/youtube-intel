@@ -94,13 +94,64 @@ export interface YouTubeReportSummary {
   has_error: boolean;
 }
 
+// ─── Channel types ──────────────────────────────────────────────────────────
+
+export interface WatchedChannel {
+  id: number;
+  channel_id: string;
+  channel_name: string;
+  subscriber_count: number;
+  thumbnail: string;
+  is_active: boolean;
+  added_at: string;
+  last_checked_at: string | null;
+  video_count: number;
+}
+
+export interface ChannelVideoItem {
+  id: number;
+  video_id: string;
+  channel_id: string;
+  channel_name?: string;
+  title: string;
+  published_at: string;
+  thumbnail: string;
+  view_count: number;
+  topic_classification: string;
+  summary: string;
+  detected_at: string;
+}
+
 // ─── API functions ───────────────────────────────────────────────────────────
 
+async function postAPI<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(body)) params.append(k, String(v));
+  const resp = await fetch(`${API_URL}${path}?${params.toString()}`, { method: "POST" });
+  if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+  return resp.json();
+}
+
 export const api = {
+  // Reports
   getYouTubeReport: (topic: string, hours = 168) =>
     fetchAPI<YouTubeReport>(`/api/youtube/report/${encodeURIComponent(topic)}?hours=${hours}`),
   getYouTubeReports: (limit = 50, offset = 0) =>
     fetchAPI<YouTubeReportSummary[]>(`/api/youtube/reports?limit=${limit}&offset=${offset}`),
   getYouTubeReportById: (id: number) =>
     fetchAPI<YouTubeReport>(`/api/youtube/reports/${id}`),
+
+  // Channels
+  addChannel: (channelUrl: string) =>
+    postAPI<WatchedChannel & { error?: string }>("/api/channels/add", { channel_url: channelUrl }),
+  getChannels: () =>
+    fetchAPI<WatchedChannel[]>("/api/channels"),
+  removeChannel: (channelId: string) =>
+    fetch(`${API_URL}/api/channels/${channelId}`, { method: "DELETE" }).then(r => r.json()),
+  getChannelVideos: (channelId: string, limit = 50) =>
+    fetchAPI<ChannelVideoItem[]>(`/api/channels/${channelId}/videos?limit=${limit}`),
+  getActivityFeed: (limit = 50) =>
+    fetchAPI<ChannelVideoItem[]>(`/api/channels/feed?limit=${limit}`),
+  pollChannels: () =>
+    postAPI<{ channels_checked: number; new_videos: number }>("/api/channels/poll"),
 };

@@ -163,3 +163,29 @@ class YouTubeClient:
             "view_count": int(stats.get("viewCount", 0)),
             "thumbnail": snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
         }
+
+    async def get_channel_by_handle(self, handle: str) -> Optional[Dict]:
+        """Resolve a YouTube handle (@name) or custom URL to channel info. Costs 1 unit."""
+        handle = handle.strip().lstrip("@")
+        # Try forHandle parameter
+        params = {
+            "part": "snippet,statistics",
+            "forHandle": handle,
+        }
+        try:
+            data = await self._request("channels", params)
+            self.units_used += 1
+            items = data.get("items", [])
+            if items:
+                item = items[0]
+                stats = item.get("statistics", {})
+                snippet = item.get("snippet", {})
+                return {
+                    "channel_id": item["id"],
+                    "title": snippet.get("title", ""),
+                    "subscriber_count": int(stats.get("subscriberCount", 0)),
+                    "thumbnail": snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
+                }
+        except Exception as e:
+            logger.debug("Handle lookup failed for %s: %s", handle, e)
+        return None
