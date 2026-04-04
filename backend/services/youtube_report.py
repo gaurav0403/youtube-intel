@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from backend.config import settings
 from backend.services.gemini_client import extract_json, generate
 from backend.services.youtube_client import YouTubeClient
-from backend.services.youtube_transcript import get_transcripts_batch
+from backend.services.youtube_transcript import get_transcripts_batch_async
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +88,9 @@ async def _run_report(
     # Sort by views descending
     videos.sort(key=lambda x: x.get("view_count", 0), reverse=True)
 
-    # Step 3: Transcripts (free, top 15)
+    # Step 3: Transcripts (free, top 15) — runs in thread pool
     top_ids = [v["video_id"] for v in videos[:15]]
-    transcripts = get_transcripts_batch(top_ids)
+    transcripts = await get_transcripts_batch_async(top_ids)
 
     # Step 4: Comments for top 10 videos
     comments_map: Dict[str, List[Dict]] = {}
@@ -98,8 +98,21 @@ async def _run_report(
         vid = v["video_id"]
         comments_map[vid] = await yt.get_video_comments(vid, max_results=20)
 
-    # Step 5: Build Gemini prompt
-    prompt = _build_prompt(topic, hours, videos, transcripts, comments_map)
+    # Step 5: Channel info (deduplicate, top 10 channels by video count)
+    channel_ids: Dict[str, int] = {}
+    for v in videos:
+        cid = v.get("channel_id", "")
+        if cid:
+            channel_ids[cid] = channel_ids.get(cid, 0) + 1
+    top_channel_ids = sorted(channel_ids, key=channel_ids.get, reverse=True)[:10]
+    channels_map: Dict[str, Dict] = {}
+    for cid in top_channel_ids:
+        info = await yt.get_channel_info(cid)
+        if info:
+            channels_map[cid] = info
+
+    # Step 6: Build Gemini prompt
+    prompt = _build_prompt(topic, hours, videos, transcripts, comments_map, channels_map)
     result_text, gemini_cost = await generate(
         prompt=prompt,
         system_instruction="You are a YouTube narrative intelligence analyst. Analyze YouTube videos covering a topic and produce a structured intelligence report in JSON.",
@@ -139,8 +152,20 @@ def _build_prompt(
     videos: List[Dict],
     transcripts: Dict[str, str],
     comments_map: Dict[str, List[Dict]],
+    channels_map: Dict[str, Dict] | None = None,
 ) -> str:
     """Build the Gemini analysis prompt with all collected data."""
+
+    # Channel info block
+    channel_block = ""
+    if channels_map:
+        channel_block = "\n=== CHANNEL INFO ===\n"
+        for cid, ch in channels_map.items():
+            channel_block += (
+                f"- {ch.get('title', 'Unknown')} (ID: {cid}): "
+                f"{ch.get('subscriber_count', 0):,} subscribers, "
+                f"{ch.get('video_count', 0):,} total videos\n"
+            )
 
     # Video summaries
     video_block = ""
@@ -164,7 +189,7 @@ URL: https://youtube.com/watch?v={vid}
     return f"""Analyze YouTube coverage of the topic: "{topic}" (last {hours} hours).
 
 I found {len(videos)} videos. Here are the details:
-
+{channel_block}
 {video_block}
 
 Produce a JSON intelligence report with this EXACT structure:
@@ -223,7 +248,7 @@ Produce a JSON intelligence report with this EXACT structure:
 
 REQUIREMENTS:
 - At least 3 narrative angles
-- At least 3 channels in channel_analysis
+- At least 3 channels in channel_analysis — use REAL subscriber counts from CHANNEL INFO above
 - At least 3 key claims tracked
 - All video_ids must be real IDs from the data above
 - Sort narrative angles by video_count descending
