@@ -9,6 +9,7 @@ import {
   type MonitoringVideo,
   type MonitoringNarrative,
   type MonitoringGroupAnalysis,
+  type NarrativeStateInfo,
 } from "@/lib/api";
 import { formatNumber, formatIST } from "@/lib/utils";
 import {
@@ -69,17 +70,25 @@ const PRINT_STYLES = `
 
 // ─── Loading View ────────────────────────────────────────────────────────────
 
-const STEPS = [
+const STEPS_LEGACY = [
   "Pulling videos from 100+ channels...",
   "Fetching view counts & engagement...",
   "Extracting transcripts...",
   "Running Gemini narrative analysis...",
 ];
 
-function LoadingView() {
+const STEPS_STATE = [
+  "Checking narrative state...",
+  "Formatting report from state...",
+  "Generating polished analysis...",
+];
+
+function LoadingView({ hasState }: { hasState: boolean }) {
   const [step, setStep] = useState(0);
+  const steps = hasState ? STEPS_STATE : STEPS_LEGACY;
+  const timings = hasState ? [1000, 3000] : [3000, 8000, 15000];
   useEffect(() => {
-    const timers = [3000, 8000, 15000].map((ms, i) =>
+    const timers = timings.map((ms, i) =>
       setTimeout(() => setStep(i + 1), ms)
     );
     return () => timers.forEach(clearTimeout);
@@ -93,7 +102,7 @@ function LoadingView() {
         <div className="absolute -inset-1 rounded-2xl bg-red-400/20 animate-ping" />
       </div>
       <div className="w-full max-w-xs space-y-2">
-        {STEPS.map((s, i) => (
+        {steps.map((s, i) => (
           <div key={s} className={`flex items-center gap-2.5 text-sm transition-all duration-500 ${i <= step ? "opacity-100" : "opacity-25"}`}>
             <div className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 text-xs ${
               i < step ? "bg-red-500 text-white" : i === step ? "bg-red-100 border-2 border-red-400" : "bg-gray-100 border border-gray-200"
@@ -104,7 +113,7 @@ function LoadingView() {
           </div>
         ))}
       </div>
-      <p className="text-xs text-gray-400">This takes 30–60 seconds</p>
+      <p className="text-xs text-gray-400">{hasState ? "This takes 5–10 seconds" : "This takes 30–60 seconds"}</p>
     </div>
   );
 }
@@ -552,9 +561,14 @@ export default function MonitoringPage() {
   const [generating, setGenerating] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [stateInfo, setStateInfo] = useState<NarrativeStateInfo | null>(null);
+  const [buildingBatch, setBuildingBatch] = useState(false);
 
   useEffect(() => {
-    api.getMonitoringReports(20).then(setPastReports).catch(() => {}).finally(() => setLoading(false));
+    Promise.all([
+      api.getMonitoringReports(20).then(setPastReports).catch(() => {}),
+      api.getNarrativeState().then(setStateInfo).catch(() => {}),
+    ]).finally(() => setLoading(false));
   }, []);
 
   const handleGenerate = async () => {
@@ -568,11 +582,29 @@ export default function MonitoringPage() {
       } else {
         setReport(r);
         api.getMonitoringReports(20).then(setPastReports).catch(() => {});
+        api.getNarrativeState().then(setStateInfo).catch(() => {});
       }
     } catch {
       setError("Failed to generate report");
     } finally {
       setGenerating(false);
+    }
+  };
+
+  const handleBatchBuild = async () => {
+    setBuildingBatch(true);
+    setError("");
+    try {
+      const result = await api.triggerBatchBuild(hours);
+      if (result.error) {
+        setError(result.error);
+      } else {
+        api.getNarrativeState().then(setStateInfo).catch(() => {});
+      }
+    } catch {
+      setError("Failed to build batch state");
+    } finally {
+      setBuildingBatch(false);
     }
   };
 
@@ -610,6 +642,25 @@ export default function MonitoringPage() {
         </div>
       </div>
 
+      {/* State Status */}
+      {stateInfo?.active && (
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 no-print">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+              <span className="text-sm font-medium text-emerald-800">Narrative State Active</span>
+              <span className="text-xs text-emerald-600">
+                {stateInfo.total_videos_processed} videos | {stateInfo.narrative_count} narratives | {stateInfo.incremental_updates} updates
+              </span>
+            </div>
+            <div className="flex items-center gap-3 text-xs text-emerald-600">
+              <span>Cost: ${((stateInfo.total_gemini_cost_usd || 0) + (stateInfo.total_haiku_cost_usd || 0)).toFixed(4)}</span>
+              {stateInfo.updated_at && <span>Updated: {formatIST(stateInfo.updated_at)} IST</span>}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Generate controls */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5 no-print">
         <div className="flex items-center gap-3">
@@ -627,14 +678,24 @@ export default function MonitoringPage() {
               </button>
             ))}
           </div>
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="ml-auto flex items-center gap-2 px-5 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white rounded-xl text-sm font-medium transition-colors"
-          >
-            {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-            {generating ? "Analyzing..." : "Generate Report"}
-          </button>
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={handleBatchBuild}
+              disabled={buildingBatch || generating}
+              className="flex items-center gap-2 px-4 py-2.5 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 text-gray-700 rounded-xl text-sm font-medium transition-colors"
+            >
+              {buildingBatch ? <Loader2 className="w-4 h-4 animate-spin" /> : <Brain className="w-4 h-4" />}
+              {buildingBatch ? "Building..." : "Rebuild State"}
+            </button>
+            <button
+              onClick={handleGenerate}
+              disabled={generating}
+              className="flex items-center gap-2 px-5 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-40 text-white rounded-xl text-sm font-medium transition-colors"
+            >
+              {generating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+              {generating ? "Analyzing..." : "Generate Report"}
+            </button>
+          </div>
         </div>
         {error && (
           <p className="text-sm text-red-500 mt-3 flex items-center gap-1">
@@ -644,7 +705,7 @@ export default function MonitoringPage() {
       </div>
 
       {/* Loading state */}
-      {generating && <LoadingView />}
+      {generating && <LoadingView hasState={!!stateInfo?.active} />}
 
       {/* Report */}
       {!generating && hasReport && <ReportView report={report!} />}

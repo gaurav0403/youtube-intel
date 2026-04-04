@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
 
 from backend.config import settings
 from backend.database import async_session
-from backend.models import ChannelVideo, WatchedChannel
+from backend.models import ChannelVideo, NarrativeState, WatchedChannel
 from backend.services.gemini_client import extract_json, generate
 from backend.services.youtube_transcript import get_transcripts_batch_async
 
@@ -369,3 +369,272 @@ REQUIREMENTS:
 - Highlight when Mainstream and Independent groups diverge on framing
 - Note which groups amplify government narratives vs which are critical
 """
+
+
+# ─── State-based report generation ──────────────────────────────────────────
+
+
+async def generate_report_from_state(format_pass: bool = True) -> Optional[Dict[str, Any]]:
+    """Generate a monitoring report from the active NarrativeState.
+
+    Args:
+        format_pass: If True, use a light Gemini call to format state into
+            polished report JSON. If False, map directly in Python (free, instant).
+
+    Returns:
+        Report dict matching existing MonitoringReport schema, or None if no active state.
+    """
+    async with async_session() as db:
+        result = await db.execute(
+            select(NarrativeState).where(NarrativeState.is_active == True)  # noqa: E712
+        )
+        state_row = result.scalar_one_or_none()
+
+    if not state_row:
+        return None
+
+    state = state_row.state_json
+    narratives = state.get("narratives", [])
+    group_summaries = state.get("group_summaries", {})
+
+    if format_pass:
+        return await _format_with_gemini(state_row, state)
+    else:
+        return _format_with_python(state_row, state)
+
+
+async def _format_with_gemini(
+    state_row: NarrativeState,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Use a light Gemini call to format narrative state into the report JSON schema."""
+    import json
+
+    narratives = state.get("narratives", [])
+    group_summaries = state.get("group_summaries", {})
+
+    # Build a compact representation for Gemini
+    compact = json.dumps({
+        "narratives": [
+            {
+                "title": n.get("title"),
+                "sentiment": n.get("sentiment"),
+                "video_count": n.get("video_count"),
+                "total_views": n.get("total_views"),
+                "description": n.get("description", "")[:300],
+                "key_claims": [
+                    (c["claim"] if isinstance(c, dict) else c)
+                    for c in (n.get("key_claims") or [])[:3]
+                ],
+                "group_coverage": n.get("group_coverage", {}),
+                "top_videos": n.get("top_videos", [])[:3],
+                "velocity": n.get("velocity"),
+            }
+            for n in narratives[:12]
+        ],
+        "group_summaries": group_summaries,
+        "sentiment_overview": state.get("sentiment_overview", {}),
+        "emerging_stories": state.get("emerging_stories", [])[:5],
+        "trending_signals": state.get("trending_signals", {}),
+        "notable_absences": state.get("notable_absences", ""),
+    }, indent=1)
+
+    prompt = f"""Format this narrative intelligence state into a polished monitoring report.
+
+State ({state_row.total_videos_processed} videos, {state_row.total_channels} channels, {len(narratives)} narratives):
+
+{compact}
+
+Return JSON matching this EXACT schema:
+{{
+    "headline": "One crisp headline (under 15 words)",
+    "executive_summary": "3-4 sentences comparing how 4 groups frame the dominant stories",
+    "total_views": <sum of all narrative views>,
+    "narrative_angles": [
+        {{
+            "title": "Narrative title",
+            "sentiment": "positive|negative|neutral|mixed",
+            "video_count": <number>,
+            "total_views": <number>,
+            "description": "2-3 sentences",
+            "key_claims": ["claim1", "claim2"],
+            "channels_pushing": ["ch1", "ch2"],
+            "categories_involved": ["Mainstream Media", "Independent & Digital"],
+            "top_videos": [{{"video_id": "id", "title": "title", "channel": "ch", "views": 0, "why": "reason"}}]
+        }}
+    ],
+    "group_analysis": [
+        {{
+            "group": "Mainstream Media",
+            "channel_count": 0, "video_count": 0, "total_views": 0,
+            "dominant_topic": "topic", "framing": "2-3 sentences",
+            "bias_signal": "pro-government|critical|neutral|mixed",
+            "notable_channels": [{{"name": "ch", "videos": 0, "stance": "brief"}}]
+        }}
+    ],
+    "key_claims_tracked": [
+        {{"claim": "text", "videos_making_claim": 0, "channels": ["ch"], "assessment": "Verified|Unverified|Misleading"}}
+    ],
+    "sentiment_overview": {{
+        "overall": "mixed", "pro_government_pct": 0, "critical_pct": 0,
+        "neutral_analytical_pct": 0, "most_polarizing_topic": "topic"
+    }},
+    "trending_signals": {{"velocity": "rising|stable|declining", "peak_period": "when", "prediction": "what next"}},
+    "emerging_stories": [{{"topic": "story", "early_signals": "why", "channels_covering": ["ch"]}}],
+    "notable_absences": "What's NOT being covered"
+}}
+
+RULES:
+- EXACTLY 4 entries in group_analysis
+- Use real data from the state — do not invent
+- Write polished prose for executive_summary and framing fields
+"""
+    text, cost = await generate(
+        prompt=prompt,
+        system_instruction=(
+            "You format narrative intelligence data into polished JSON reports. "
+            "Maintain factual accuracy from the source data."
+        ),
+        temperature=0.2,
+    )
+    analysis = extract_json(text)
+
+    total_views = sum(n.get("total_views", 0) for n in narratives)
+
+    return {
+        "hours": 24,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "video_count": state_row.total_videos_processed,
+        "channel_count": state_row.total_channels,
+        "videos": [],  # not included in state-based report (too large)
+        "analysis": analysis,
+        "gemini_cost_usd": cost,
+        "haiku_cost_usd": 0,
+        "youtube_units_used": 0,
+        "state_id": state_row.id,
+        "state_based": True,
+    }
+
+
+def _format_with_python(
+    state_row: NarrativeState,
+    state: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Map narrative state directly to report JSON schema — free, instant."""
+    narratives = state.get("narratives", [])
+    group_summaries = state.get("group_summaries", {})
+
+    # Build narrative_angles from narratives
+    narrative_angles = []
+    for n in narratives:
+        # Collect channels from group_coverage
+        channels_pushing = []
+        categories_involved = []
+        for grp, cov in n.get("group_coverage", {}).items():
+            categories_involved.append(grp)
+            channels_pushing.extend(cov.get("top_channels", []))
+
+        narrative_angles.append({
+            "title": n.get("title", ""),
+            "sentiment": n.get("sentiment", "mixed"),
+            "video_count": n.get("video_count", 0),
+            "total_views": n.get("total_views", 0),
+            "description": n.get("description", ""),
+            "key_claims": [
+                (c["claim"] if isinstance(c, dict) else c)
+                for c in (n.get("key_claims") or [])
+            ],
+            "channels_pushing": channels_pushing[:10],
+            "categories_involved": categories_involved,
+            "top_videos": n.get("top_videos", [])[:5],
+        })
+
+    # Build group_analysis from group_summaries
+    group_analysis = []
+    for grp_name in ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]:
+        gs = group_summaries.get(grp_name, {})
+        group_analysis.append({
+            "group": grp_name,
+            "channel_count": gs.get("channel_count", 0),
+            "video_count": gs.get("video_count", 0),
+            "total_views": gs.get("views", 0),
+            "dominant_topic": gs.get("dominant_narrative", ""),
+            "framing": gs.get("framing", ""),
+            "bias_signal": gs.get("bias_signal", "neutral"),
+            "notable_channels": [],
+        })
+
+    # Build key_claims_tracked from all narratives
+    all_claims = []
+    seen_claims: set[str] = set()
+    for n in narratives:
+        for c in n.get("key_claims", []):
+            if isinstance(c, dict):
+                claim_text = c.get("claim", "")
+                if claim_text not in seen_claims:
+                    seen_claims.add(claim_text)
+                    all_claims.append({
+                        "claim": claim_text,
+                        "videos_making_claim": n.get("video_count", 0),
+                        "channels": c.get("sources", []),
+                        "assessment": c.get("assessment", "Unverified"),
+                    })
+
+    total_views = sum(n.get("total_views", 0) for n in narratives)
+
+    # Build headline from top narrative
+    headline = narratives[0]["title"] if narratives else "No active narratives"
+
+    # Build executive summary
+    top_titles = [n["title"] for n in narratives[:3]]
+    exec_summary = (
+        f"Analysis of {state_row.total_videos_processed} videos across "
+        f"{state_row.total_channels} channels. Top narratives: {', '.join(top_titles)}."
+    )
+
+    sentiment = state.get("sentiment_overview", {})
+    trending = state.get("trending_signals", {})
+
+    analysis = {
+        "headline": headline,
+        "executive_summary": exec_summary,
+        "total_views": total_views,
+        "narrative_angles": narrative_angles,
+        "group_analysis": group_analysis,
+        "key_claims_tracked": all_claims[:10],
+        "sentiment_overview": {
+            "overall": sentiment.get("overall", "mixed"),
+            "pro_government_pct": sentiment.get("pro_government_pct", 0),
+            "critical_pct": sentiment.get("critical_pct", 0),
+            "neutral_analytical_pct": sentiment.get("neutral_pct", 0),
+            "most_polarizing_topic": sentiment.get("most_polarizing_topic", ""),
+        },
+        "trending_signals": {
+            "velocity": trending.get("velocity", "stable"),
+            "peak_period": trending.get("peak_period", ""),
+            "prediction": trending.get("prediction", ""),
+        },
+        "emerging_stories": [
+            {
+                "topic": s.get("topic", ""),
+                "early_signals": s.get("first_seen", s.get("early_signals", "")),
+                "channels_covering": s.get("channels_covering", []),
+            }
+            for s in state.get("emerging_stories", [])[:5]
+        ],
+        "notable_absences": state.get("notable_absences", ""),
+    }
+
+    return {
+        "hours": 24,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "video_count": state_row.total_videos_processed,
+        "channel_count": state_row.total_channels,
+        "videos": [],
+        "analysis": analysis,
+        "gemini_cost_usd": 0,
+        "haiku_cost_usd": 0,
+        "youtube_units_used": 0,
+        "state_id": state_row.id,
+        "state_based": True,
+    }

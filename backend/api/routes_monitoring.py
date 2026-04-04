@@ -16,11 +16,61 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/api/monitoring/generate")
-async def generate_report(hours: int = Query(24, ge=1, le=168)):
-    """Generate a monitoring report for the last N hours."""
-    from backend.services.monitoring_report import generate_monitoring_report
+async def generate_report(
+    hours: int = Query(24, ge=1, le=168),
+    format_pass: bool = Query(True),
+):
+    """Generate a monitoring report.
 
+    Prefers state-based generation if an active NarrativeState exists.
+    Falls back to legacy stateless generation otherwise.
+    """
     now = datetime.now(timezone.utc)
+
+    # Try state-based generation first
+    try:
+        from backend.services.monitoring_report import generate_report_from_state
+        state_result = await generate_report_from_state(format_pass=format_pass)
+        if state_result and state_result.get("analysis"):
+            report = {
+                "hours": state_result.get("hours", hours),
+                "generated_at": state_result.get("generated_at", now.isoformat()),
+                "video_count": state_result.get("video_count", 0),
+                "channel_count": state_result.get("channel_count", 0),
+                "videos": state_result.get("videos", []),
+                "analysis": state_result.get("analysis"),
+                "gemini_cost_usd": state_result.get("gemini_cost_usd", 0),
+                "state_id": state_result.get("state_id"),
+                "state_based": True,
+                "error": None,
+            }
+            # Save to DB
+            try:
+                async with async_session() as db:
+                    row = MonitoringReport(
+                        hours=hours,
+                        generated_at=now,
+                        video_count=state_result.get("video_count", 0),
+                        channel_count=state_result.get("channel_count", 0),
+                        gemini_cost_usd=state_result.get("gemini_cost_usd", 0),
+                        report_json=report,
+                    )
+                    db.add(row)
+                    await db.commit()
+                    await db.refresh(row)
+                    report["id"] = row.id
+                    logger.info(
+                        "State-based report saved: id=%d, state=%d, videos=%d",
+                        row.id, state_result.get("state_id", 0), state_result.get("video_count", 0),
+                    )
+            except Exception:
+                logger.exception("Failed to save state-based report to DB")
+            return report
+    except Exception:
+        logger.exception("State-based report generation failed, falling back to legacy")
+
+    # Fallback: legacy stateless generation
+    from backend.services.monitoring_report import generate_monitoring_report
     result = await generate_monitoring_report(hours=hours)
 
     report = {
@@ -31,6 +81,7 @@ async def generate_report(hours: int = Query(24, ge=1, le=168)):
         "videos": result.get("videos", []),
         "analysis": result.get("analysis"),
         "gemini_cost_usd": result.get("gemini_cost_usd", 0),
+        "state_based": False,
         "error": result.get("error"),
     }
 
@@ -50,11 +101,56 @@ async def generate_report(hours: int = Query(24, ge=1, le=168)):
             await db.commit()
             await db.refresh(row)
             report["id"] = row.id
-            logger.info("Monitoring report saved: id=%d, hours=%d, videos=%d", row.id, hours, result.get("video_count", 0))
+            logger.info("Legacy report saved: id=%d, hours=%d, videos=%d", row.id, hours, result.get("video_count", 0))
     except Exception:
         logger.exception("Failed to save monitoring report to DB")
 
     return report
+
+
+@router.post("/api/monitoring/batch")
+async def trigger_batch_build(hours: int = Query(24, ge=1, le=168)):
+    """Trigger a fresh batch narrative state build."""
+    from backend.services.narrative_state import build_batch_state
+
+    try:
+        result = await build_batch_state(hours=hours)
+        if result.get("error"):
+            return {"error": result["error"]}
+        return {
+            "status": "ok",
+            "state_id": result.get("state_id"),
+            "videos_processed": result.get("videos_processed", 0),
+            "narratives": result.get("narratives", 0),
+            "chunks": result.get("chunks", 0),
+            "gemini_cost_usd": result.get("gemini_cost_usd", 0),
+            "haiku_cost_usd": result.get("haiku_cost_usd", 0),
+        }
+    except Exception:
+        logger.exception("Batch build failed")
+        return {"error": "Batch build failed — check server logs"}
+
+
+@router.get("/api/monitoring/state")
+async def get_active_state():
+    """Get the currently active narrative state metadata."""
+    from backend.services.narrative_state import get_active_state
+
+    state = await get_active_state()
+    if not state:
+        return {"active": False, "error": "No active narrative state"}
+    return {"active": True, **state}
+
+
+@router.get("/api/monitoring/state/{state_id}")
+async def get_state_detail(state_id: int):
+    """Get full narrative state by ID including state_json."""
+    from backend.services.narrative_state import get_state_by_id
+
+    state = await get_state_by_id(state_id)
+    if not state:
+        return {"error": "State not found"}
+    return state
 
 
 @router.get("/api/monitoring/reports")

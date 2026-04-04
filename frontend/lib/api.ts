@@ -222,6 +222,38 @@ export interface MonitoringReportSummary {
   has_error: boolean;
 }
 
+// ─── Narrative State types ──────────────────────────────────────────────────
+
+export interface NarrativeStateInfo {
+  active: boolean;
+  id?: number;
+  state_type?: string;
+  created_at?: string;
+  updated_at?: string;
+  window_start?: string;
+  window_end?: string;
+  total_videos_processed?: number;
+  total_channels?: number;
+  incremental_updates?: number;
+  narrative_count?: number;
+  total_gemini_cost_usd?: number;
+  total_haiku_cost_usd?: number;
+  last_video_id?: number;
+  is_active?: boolean;
+  error?: string;
+}
+
+export interface BatchBuildResult {
+  status?: string;
+  state_id?: number;
+  videos_processed?: number;
+  narratives?: number;
+  chunks?: number;
+  gemini_cost_usd?: number;
+  haiku_cost_usd?: number;
+  error?: string;
+}
+
 // ─── API functions ───────────────────────────────────────────────────────────
 
 async function postAPI<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -258,10 +290,18 @@ export const api = {
     postAPI<{ channels_checked: number; new_videos: number }>("/api/channels/poll"),
 
   // Monitoring Reports
-  generateMonitoringReport: (hours = 24) =>
-    postAPI<MonitoringReport>("/api/monitoring/generate", { hours }),
+  generateMonitoringReport: (hours = 24, formatPass = true) =>
+    postAPI<MonitoringReport & { state_based?: boolean; state_id?: number }>("/api/monitoring/generate", { hours, format_pass: formatPass }),
   getMonitoringReports: (limit = 20) =>
     fetchAPI<MonitoringReportSummary[]>(`/api/monitoring/reports?limit=${limit}`),
   getMonitoringReportById: (id: number) =>
     fetchAPI<MonitoringReport>(`/api/monitoring/reports/${id}`),
+
+  // Narrative State
+  getNarrativeState: () =>
+    fetchAPI<NarrativeStateInfo>("/api/monitoring/state"),
+  getNarrativeStateById: (id: number) =>
+    fetchAPI<NarrativeStateInfo & { state_json?: Record<string, unknown> }>(`/api/monitoring/state/${id}`),
+  triggerBatchBuild: (hours = 24) =>
+    postAPI<BatchBuildResult>("/api/monitoring/batch", { hours }),
 };

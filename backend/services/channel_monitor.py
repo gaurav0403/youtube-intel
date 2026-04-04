@@ -227,6 +227,20 @@ async def poll_all_channels() -> Dict[str, int]:
     finally:
         await yt.close()
 
+    # Trigger incremental narrative state update if new videos were found
+    if total_new > 0:
+        try:
+            from backend.services.narrative_state import apply_incremental_update_from_watermark
+            inc_result = await apply_incremental_update_from_watermark()
+            if inc_result and not inc_result.get("error"):
+                logger.info(
+                    "Incremental narrative update: +%d videos, cost=$%.4f",
+                    inc_result.get("new_videos", 0),
+                    inc_result.get("gemini_cost_usd", 0),
+                )
+        except Exception:
+            logger.exception("Incremental narrative update failed (non-fatal)")
+
     return {
         "channels_checked": checked,
         "new_videos": total_new,
@@ -237,6 +251,21 @@ async def poll_all_channels() -> Dict[str, int]:
 async def background_poller(interval_seconds: int = 1800) -> None:
     """Background task that polls channels on a schedule."""
     while True:
+        # Check if narrative state needs rebuild (batch)
+        try:
+            from backend.services.narrative_state import maybe_rebuild_batch_state
+            batch_result = await maybe_rebuild_batch_state()
+            if batch_result and not batch_result.get("error"):
+                logger.info(
+                    "Batch state rebuilt: %d videos, %d narratives, cost=$%.4f",
+                    batch_result.get("videos_processed", 0),
+                    batch_result.get("narratives", 0),
+                    batch_result.get("gemini_cost_usd", 0) + batch_result.get("haiku_cost_usd", 0),
+                )
+        except Exception:
+            logger.exception("Batch state rebuild check failed (non-fatal)")
+
+        # Poll channels + incremental update
         try:
             result = await poll_all_channels()
             logger.info(

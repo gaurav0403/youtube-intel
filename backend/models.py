@@ -57,6 +57,26 @@ class MonitoringReport(Base):
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 
+class NarrativeState(Base):
+    __tablename__ = "narrative_states"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    state_type: Mapped[str] = mapped_column(String(32), default="batch")  # "batch" | "incremental"
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    window_start: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    window_end: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    total_videos_processed: Mapped[int] = mapped_column(Integer, default=0)
+    total_channels: Mapped[int] = mapped_column(Integer, default=0)
+    incremental_updates: Mapped[int] = mapped_column(Integer, default=0)
+    state_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    total_gemini_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    total_haiku_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    last_video_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # ChannelVideo.id watermark
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class ChannelVideo(Base):
     __tablename__ = "channel_videos"
     __table_args__ = (
