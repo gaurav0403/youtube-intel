@@ -110,25 +110,32 @@ async def generate_report(
 
 @router.post("/api/monitoring/batch")
 async def trigger_batch_build(hours: int = Query(24, ge=1, le=168)):
-    """Trigger a fresh batch narrative state build."""
+    """Trigger a fresh batch narrative state build as a background task.
+
+    Returns immediately with status=started. Poll GET /api/monitoring/state
+    to check when the build completes.
+    """
+    import asyncio
     from backend.services.narrative_state import build_batch_state
 
-    try:
-        result = await build_batch_state(hours=hours)
-        if result.get("error"):
-            return {"error": result["error"]}
-        return {
-            "status": "ok",
-            "state_id": result.get("state_id"),
-            "videos_processed": result.get("videos_processed", 0),
-            "narratives": result.get("narratives", 0),
-            "chunks": result.get("chunks", 0),
-            "gemini_cost_usd": result.get("gemini_cost_usd", 0),
-            "haiku_cost_usd": result.get("haiku_cost_usd", 0),
-        }
-    except Exception:
-        logger.exception("Batch build failed")
-        return {"error": "Batch build failed — check server logs"}
+    async def _run_batch() -> None:
+        try:
+            result = await build_batch_state(hours=hours)
+            if result.get("error"):
+                logger.error("Batch build error: %s", result["error"])
+            else:
+                logger.info(
+                    "Batch build complete: state=%d, %d videos, %d narratives, cost=$%.4f",
+                    result.get("state_id", 0),
+                    result.get("videos_processed", 0),
+                    result.get("narratives", 0),
+                    result.get("gemini_cost_usd", 0) + result.get("haiku_cost_usd", 0),
+                )
+        except Exception:
+            logger.exception("Background batch build failed")
+
+    asyncio.create_task(_run_batch())
+    return {"status": "started", "message": "Batch build started in background. Poll GET /api/monitoring/state to check progress."}
 
 
 @router.get("/api/monitoring/state")
