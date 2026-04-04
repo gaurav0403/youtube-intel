@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, Query
 from sqlalchemy import func, select
@@ -14,6 +16,8 @@ from backend.models import ChannelVideo, WatchedChannel
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+SEED_FILE = Path(__file__).resolve().parent.parent / "data" / "channels.json"
 
 
 def _extract_channel_id(url_or_id: str) -> str | None:
@@ -248,6 +252,82 @@ async def activity_feed(limit: int = Query(50, ge=1, le=200)):
         }
         for v in videos
     ]
+
+
+@router.post("/api/channels/seed")
+async def seed_channels():
+    """Seed channels from channels.json, skipping any already in the DB."""
+    if not SEED_FILE.exists():
+        return {"error": f"Seed file not found: {SEED_FILE}"}
+
+    channels = json.loads(SEED_FILE.read_text(encoding="utf-8"))
+
+    # Get existing handles/channel_ids to skip
+    async with async_session() as db:
+        result = await db.execute(select(WatchedChannel.channel_name))
+        existing_names = {name.lower() for name in result.scalars().all()}
+
+    added = 0
+    skipped = 0
+    failed = 0
+    details = []
+
+    from backend.services.youtube_client import YouTubeClient
+
+    yt = YouTubeClient()
+    try:
+        for entry in channels:
+            handle = entry.get("handle", "")
+            name = entry.get("name", handle)
+            category = entry.get("category")
+
+            try:
+                info = await yt.get_channel_by_handle(handle)
+                if not info:
+                    failed += 1
+                    details.append({"handle": handle, "status": "resolve_failed"})
+                    continue
+
+                channel_id = info["channel_id"]
+
+                async with async_session() as db:
+                    existing = await db.execute(
+                        select(WatchedChannel).where(
+                            WatchedChannel.channel_id == channel_id
+                        )
+                    )
+                    if existing.scalar_one_or_none():
+                        skipped += 1
+                        details.append({"handle": handle, "status": "skipped"})
+                        continue
+
+                    ch = WatchedChannel(
+                        channel_id=channel_id,
+                        channel_name=info.get("title", name),
+                        subscriber_count=info.get("subscriber_count", 0),
+                        thumbnail=info.get("thumbnail", ""),
+                        category=category,
+                        added_at=datetime.now(timezone.utc),
+                    )
+                    db.add(ch)
+                    await db.commit()
+                    added += 1
+                    details.append({"handle": handle, "channel_id": channel_id, "status": "added"})
+
+            except Exception as e:
+                failed += 1
+                details.append({"handle": handle, "status": "error", "error": str(e)})
+
+    finally:
+        await yt.close()
+
+    return {
+        "added": added,
+        "skipped": skipped,
+        "failed": failed,
+        "api_units_used": yt.units_used,
+        "details": details,
+    }
 
 
 @router.post("/api/channels/poll")

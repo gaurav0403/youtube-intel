@@ -78,6 +78,11 @@ MACRO_GROUPS: Dict[str, str] = {
     "Electoral Data": "Specialist & Policy",
     "Deep Analysis": "Specialist & Policy",
     "Regional Strategy": "Specialist & Policy",
+    # Identity mappings (for channels seeded with macro group names directly)
+    "Mainstream Media": "Mainstream Media",
+    "Independent & Digital": "Independent & Digital",
+    "Regional": "Regional",
+    "Specialist & Policy": "Specialist & Policy",
 }
 
 
