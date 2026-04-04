@@ -119,6 +119,38 @@ async def build_batch_state(hours: int = 24) -> Dict[str, Any]:
             "summary": v.summary or "",
         })
 
+    # Step 1b: Enrich top 200 videos with real view counts from YouTube API
+    # videos.list costs 1 unit per 50 videos = 4 units for 200 videos
+    from backend.services.youtube_client import YouTubeClient
+    yt = YouTubeClient()
+    try:
+        top_ids = [v["video_id"] for v in video_data[:200]]
+        details = await yt.get_video_details(top_ids)
+        details_map = {d["video_id"]: d for d in details}
+        enriched = 0
+        for v in video_data:
+            d = details_map.get(v["video_id"])
+            if d:
+                v["view_count"] = d.get("view_count", 0)
+                enriched += 1
+        # Also update DB records so future incremental updates have views
+        async with async_session() as db:
+            for v in video_data:
+                d = details_map.get(v["video_id"])
+                if d and d.get("view_count", 0) > 0:
+                    vid_result2 = await db.execute(
+                        select(ChannelVideo).where(ChannelVideo.video_id == v["video_id"])
+                    )
+                    row = vid_result2.scalar_one_or_none()
+                    if row:
+                        row.view_count = d["view_count"]
+            await db.commit()
+        logger.info("Enriched %d/%d videos with YouTube view counts (API units: %d)", enriched, len(video_data), yt.units_used)
+    except Exception:
+        logger.exception("View count enrichment failed (non-fatal)")
+    finally:
+        await yt.close()
+
     # Step 2: Partition by group
     by_group: Dict[str, List[Dict]] = {}
     for v in video_data:

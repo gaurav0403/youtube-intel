@@ -581,6 +581,9 @@ def _format_with_python(
                     })
 
     total_views = sum(n.get("total_views", 0) for n in narratives)
+    # Fallback: use group_summaries views if narrative views are all 0
+    if total_views == 0:
+        total_views = sum(gs.get("views", 0) for gs in group_summaries.values())
 
     # Build headline from top narrative
     headline = narratives[0]["title"] if narratives else "No active narratives"
