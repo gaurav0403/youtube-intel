@@ -549,16 +549,34 @@ def _format_with_python(
             "top_videos": n.get("top_videos", [])[:5],
         })
 
-    # Build group_analysis from group_summaries
+    # Build group_analysis from group_summaries + live narrative data
     group_analysis = []
     for grp_name in ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]:
         gs = group_summaries.get(grp_name, {})
+
+        # Recompute dominant topic from narrative group_coverage
+        # Rank narratives by this group's video count, show top 2
+        ranked = []
+        for n in narratives:
+            gc = n.get("group_coverage", {}).get(grp_name, {})
+            gv = gc.get("video_count", 0)
+            if gv > 0:
+                ranked.append((n.get("title", ""), gv))
+        ranked.sort(key=lambda x: x[1], reverse=True)
+
+        if len(ranked) >= 2:
+            dominant_topic = f"{ranked[0][0]}; also: {ranked[1][0]}"
+        elif ranked:
+            dominant_topic = ranked[0][0]
+        else:
+            dominant_topic = gs.get("dominant_narrative", "")
+
         group_analysis.append({
             "group": grp_name,
             "channel_count": gs.get("channel_count", 0),
             "video_count": gs.get("video_count", 0),
             "total_views": gs.get("views", 0),
-            "dominant_topic": gs.get("dominant_narrative", ""),
+            "dominant_topic": dominant_topic,
             "framing": gs.get("framing", ""),
             "bias_signal": gs.get("bias_signal", "neutral"),
             "notable_channels": [],
