@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -177,7 +178,18 @@ async def check_channel(
     if rss_videos:
         channel.last_video_id = rss_videos[0]["video_id"]
 
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        logger.debug("Duplicate video for %s, skipping batch", channel.channel_id)
+        # Still update last_checked_at after rollback
+        channel.last_checked_at = datetime.now(timezone.utc)
+        if rss_videos:
+            channel.last_video_id = rss_videos[0]["video_id"]
+        await session.commit()
+        return []
+
     return new_videos
 
 
