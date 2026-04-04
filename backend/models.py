@@ -39,6 +39,7 @@ class WatchedChannel(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_checked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_video_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    category: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     thumbnail: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 

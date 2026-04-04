@@ -106,6 +106,12 @@ export interface WatchedChannel {
   added_at: string;
   last_checked_at: string | null;
   video_count: number;
+  category: string | null;
+}
+
+export interface ChannelCategory {
+  category: string;
+  count: number;
 }
 
 export interface ChannelVideoItem {
@@ -142,10 +148,12 @@ export const api = {
     fetchAPI<YouTubeReport>(`/api/youtube/reports/${id}`),
 
   // Channels
-  addChannel: (channelUrl: string) =>
-    postAPI<WatchedChannel & { error?: string }>("/api/channels/add", { channel_url: channelUrl }),
-  getChannels: () =>
-    fetchAPI<WatchedChannel[]>("/api/channels"),
+  addChannel: (channelUrl: string, category?: string) =>
+    postAPI<WatchedChannel & { error?: string; status?: string }>("/api/channels/add", { channel_url: channelUrl, ...(category ? { category } : {}) }),
+  getChannels: (category?: string) =>
+    fetchAPI<WatchedChannel[]>(`/api/channels${category ? `?category=${encodeURIComponent(category)}` : ""}`),
+  getCategories: () =>
+    fetchAPI<ChannelCategory[]>("/api/channels/categories"),
   removeChannel: (channelId: string) =>
     fetch(`${API_URL}/api/channels/${channelId}`, { method: "DELETE" }).then(r => r.json()),
   getChannelVideos: (channelId: string, limit = 50) =>

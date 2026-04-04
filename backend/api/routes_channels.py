@@ -29,16 +29,17 @@ def _extract_channel_id(url_or_id: str) -> str | None:
     return None
 
 
-@router.post("/api/channels/add")
-async def add_channel(channel_url: str):
-    """Add a YouTube channel to the watch list."""
+async def _resolve_and_add_channel(
+    channel_url: str,
+    category: str | None = None,
+) -> dict:
+    """Resolve a channel URL/handle and add to watch list. Returns result dict."""
     from backend.services.youtube_client import YouTubeClient
 
     channel_id = _extract_channel_id(channel_url)
 
     # If not a direct channel ID, try resolving via handle/custom URL
     if not channel_id:
-        # Try the YouTube API search for the handle
         yt = YouTubeClient()
         try:
             info = await yt.get_channel_by_handle(channel_url.strip())
@@ -48,15 +49,20 @@ async def add_channel(channel_url: str):
             await yt.close()
 
     if not channel_id:
-        return {"error": "Could not resolve channel ID. Provide a channel URL or ID."}
+        return {"error": f"Could not resolve: {channel_url}"}
 
     # Check if already exists
     async with async_session() as db:
         existing = await db.execute(
             select(WatchedChannel).where(WatchedChannel.channel_id == channel_id)
         )
-        if existing.scalar_one_or_none():
-            return {"error": "Channel already in watch list"}
+        row = existing.scalar_one_or_none()
+        if row:
+            # Update category if provided and channel exists
+            if category and row.category != category:
+                row.category = category
+                await db.commit()
+            return {"channel_id": channel_id, "channel_name": row.channel_name, "status": "exists"}
 
     # Fetch channel info
     yt = YouTubeClient()
@@ -74,30 +80,58 @@ async def add_channel(channel_url: str):
             channel_name=info.get("title", ""),
             subscriber_count=info.get("subscriber_count", 0),
             thumbnail=info.get("thumbnail", ""),
+            category=category,
             added_at=datetime.now(timezone.utc),
         )
         db.add(ch)
         await db.commit()
         await db.refresh(ch)
 
-    logger.info("Added channel: %s (%s)", info.get("title"), channel_id)
+    logger.info("Added channel: %s (%s) [%s]", info.get("title"), channel_id, category)
     return {
         "id": ch.id,
         "channel_id": channel_id,
         "channel_name": info.get("title", ""),
         "subscriber_count": info.get("subscriber_count", 0),
         "thumbnail": info.get("thumbnail", ""),
+        "category": category,
+        "status": "added",
     }
 
 
+@router.post("/api/channels/add")
+async def add_channel(channel_url: str, category: str | None = None):
+    """Add a YouTube channel to the watch list."""
+    return await _resolve_and_add_channel(channel_url, category)
+
+
+@router.post("/api/channels/bulk-add")
+async def bulk_add_channels(channels: list[dict]):
+    """Bulk add channels. Body: [{"handle": "@foo", "name": "Foo", "category": "News"}, ...]"""
+    results = []
+    for ch in channels:
+        handle = ch.get("handle", "")
+        category = ch.get("category")
+        try:
+            result = await _resolve_and_add_channel(handle, category)
+            result["input_handle"] = handle
+            results.append(result)
+        except Exception as e:
+            results.append({"input_handle": handle, "error": str(e)})
+    added = sum(1 for r in results if r.get("status") == "added")
+    existing = sum(1 for r in results if r.get("status") == "exists")
+    failed = sum(1 for r in results if "error" in r)
+    return {"added": added, "existing": existing, "failed": failed, "details": results}
+
+
 @router.get("/api/channels")
-async def list_channels():
-    """List all watched channels with video counts."""
+async def list_channels(category: str | None = None):
+    """List all watched channels with video counts. Optionally filter by category."""
     async with async_session() as db:
-        # Get channels
-        result = await db.execute(
-            select(WatchedChannel).order_by(WatchedChannel.added_at.desc())
-        )
+        stmt = select(WatchedChannel).order_by(WatchedChannel.channel_name.asc())
+        if category:
+            stmt = stmt.where(WatchedChannel.category == category)
+        result = await db.execute(stmt)
         channels = result.scalars().all()
 
         # Get video counts per channel
@@ -117,10 +151,24 @@ async def list_channels():
             "is_active": ch.is_active,
             "added_at": ch.added_at.isoformat() if ch.added_at else None,
             "last_checked_at": ch.last_checked_at.isoformat() if ch.last_checked_at else None,
+            "category": ch.category,
             "video_count": counts.get(ch.channel_id, 0),
         }
         for ch in channels
     ]
+
+
+@router.get("/api/channels/categories")
+async def list_categories():
+    """List all unique channel categories with counts."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(WatchedChannel.category, func.count(WatchedChannel.id))
+            .where(WatchedChannel.is_active == True)  # noqa: E712
+            .group_by(WatchedChannel.category)
+            .order_by(func.count(WatchedChannel.id).desc())
+        )
+        return [{"category": cat or "Uncategorized", "count": count} for cat, count in result.all()]
 
 
 @router.delete("/api/channels/{channel_id}")
