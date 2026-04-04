@@ -164,6 +164,43 @@ class YouTubeClient:
             "thumbnail": snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
         }
 
+    async def get_channel_uploads(
+        self,
+        channel_id: str,
+        max_results: int = 15,
+    ) -> List[Dict]:
+        """Get recent uploads for a channel via playlistItems. Costs 1 unit.
+
+        The uploads playlist ID is the channel ID with 'UC' replaced by 'UU'.
+        """
+        uploads_playlist = "UU" + channel_id[2:]
+        params: Dict[str, Any] = {
+            "part": "snippet",
+            "playlistId": uploads_playlist,
+            "maxResults": min(max_results, 50),
+        }
+        try:
+            data = await self._request("playlistItems", params)
+            self.units_used += 1
+        except httpx.HTTPStatusError:
+            return []
+
+        results = []
+        for item in data.get("items", []):
+            snippet = item.get("snippet", {})
+            resource = snippet.get("resourceId", {})
+            vid = resource.get("videoId", "")
+            if not vid:
+                continue
+            results.append({
+                "video_id": vid,
+                "title": snippet.get("title", ""),
+                "published_at": snippet.get("publishedAt", ""),
+                "thumbnail": snippet.get("thumbnails", {}).get("high", {}).get("url", "")
+                    or snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
+            })
+        return results
+
     async def get_channel_by_handle(self, handle: str) -> Optional[Dict]:
         """Resolve a YouTube handle (@name) or custom URL to channel info. Costs 1 unit."""
         handle = handle.strip().lstrip("@")

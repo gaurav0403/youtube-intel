@@ -108,13 +108,30 @@ Videos:
     return [{"topic": "unknown", "summary": ""} for _ in titles]
 
 
-async def check_channel(session: AsyncSession, channel: WatchedChannel) -> List[ChannelVideo]:
-    """Check a channel for new videos via RSS and store them."""
+async def check_channel(
+    session: AsyncSession,
+    channel: WatchedChannel,
+    yt_client: Any = None,
+) -> List[ChannelVideo]:
+    """Check a channel for new videos. Tries RSS first, falls back to YouTube API."""
     new_videos = []
+
+    # Try RSS first (free)
+    rss_videos: List[Dict[str, Any]] = []
     try:
         rss_videos = await fetch_rss_videos(channel.channel_id)
     except Exception as e:
-        logger.warning("RSS fetch failed for %s: %s", channel.channel_id, e)
+        logger.debug("RSS failed for %s, trying API: %s", channel.channel_id, e)
+
+    # Fallback to YouTube API if RSS failed and client is available
+    if not rss_videos and yt_client:
+        try:
+            rss_videos = await yt_client.get_channel_uploads(channel.channel_id, max_results=15)
+        except Exception as e:
+            logger.warning("API fetch also failed for %s: %s", channel.channel_id, e)
+            return []
+
+    if not rss_videos:
         return []
 
     # Get existing video IDs for this channel
@@ -165,24 +182,34 @@ async def check_channel(session: AsyncSession, channel: WatchedChannel) -> List[
 
 async def poll_all_channels() -> Dict[str, int]:
     """Poll all active watched channels for new videos."""
-    async with async_session() as session:
-        result = await session.execute(
-            select(WatchedChannel).where(WatchedChannel.is_active == True)  # noqa: E712
-        )
-        channels = result.scalars().all()
+    from backend.services.youtube_client import YouTubeClient
 
-        total_new = 0
-        checked = 0
-        for channel in channels:
-            new_vids = await check_channel(session, channel)
-            total_new += len(new_vids)
-            checked += 1
-            if new_vids:
-                logger.info(
-                    "Found %d new videos for %s", len(new_vids), channel.channel_name
-                )
+    yt = YouTubeClient()
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(WatchedChannel).where(WatchedChannel.is_active == True)  # noqa: E712
+            )
+            channels = result.scalars().all()
 
-    return {"channels_checked": checked, "new_videos": total_new}
+            total_new = 0
+            checked = 0
+            for channel in channels:
+                new_vids = await check_channel(session, channel, yt_client=yt)
+                total_new += len(new_vids)
+                checked += 1
+                if new_vids:
+                    logger.info(
+                        "Found %d new videos for %s", len(new_vids), channel.channel_name
+                    )
+    finally:
+        await yt.close()
+
+    return {
+        "channels_checked": checked,
+        "new_videos": total_new,
+        "youtube_units_used": yt.units_used,
+    }
 
 
 async def background_poller(interval_seconds: int = 1800) -> None:
