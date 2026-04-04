@@ -16,6 +16,7 @@ from backend.config import settings
 from backend.database import async_session, init_db
 from backend.models import WatchedChannel
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 SEED_FILE = Path(__file__).parent / "data" / "channels.json"
