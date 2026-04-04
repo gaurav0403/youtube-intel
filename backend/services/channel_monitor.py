@@ -80,6 +80,34 @@ Title: "{title}"
         return {"topic": "unknown", "summary": ""}
 
 
+async def classify_videos_batch(titles: List[str]) -> List[Dict[str, str]]:
+    """Batch classify multiple videos in a single Gemini call."""
+    if not settings.gemini_api_key or not titles:
+        return [{"topic": "unknown", "summary": ""} for _ in titles]
+
+    numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles))
+    prompt = f"""Classify each YouTube video by its title. Return a JSON array with one object per video, in order:
+[{{"topic": "short topic label (2-4 words)", "summary": "one sentence summary"}}]
+
+Videos:
+{numbered}
+"""
+    try:
+        text, _ = await generate(
+            prompt=prompt,
+            system_instruction="You classify YouTube videos into topics. Be concise. Return a JSON array.",
+            temperature=0.1,
+        )
+        import json
+        results = json.loads(text)
+        if isinstance(results, list) and len(results) == len(titles):
+            return results
+    except Exception as e:
+        logger.warning("Batch classification failed: %s", e)
+
+    return [{"topic": "unknown", "summary": ""} for _ in titles]
+
+
 async def check_channel(session: AsyncSession, channel: WatchedChannel) -> List[ChannelVideo]:
     """Check a channel for new videos via RSS and store them."""
     new_videos = []
@@ -95,13 +123,24 @@ async def check_channel(session: AsyncSession, channel: WatchedChannel) -> List[
     )
     existing_ids = {row[0] for row in result.fetchall()}
 
-    for rv in rss_videos:
-        if rv["video_id"] in existing_ids:
-            continue
+    # Filter to only new videos
+    new_rss = [rv for rv in rss_videos if rv["video_id"] not in existing_ids]
+    if not new_rss:
+        channel.last_checked_at = datetime.now(timezone.utc)
+        if rss_videos:
+            channel.last_video_id = rss_videos[0]["video_id"]
+        await session.commit()
+        return []
 
-        # Classify new video
-        classification = await classify_video(rv["title"])
+    # Batch classify all new videos in one Gemini call
+    titles = [rv["title"] for rv in new_rss]
+    try:
+        classifications = await classify_videos_batch(titles)
+    except Exception as e:
+        logger.debug("Batch classification failed for %s: %s", channel.channel_id, e)
+        classifications = [{"topic": "unknown", "summary": ""} for _ in new_rss]
 
+    for rv, cls in zip(new_rss, classifications):
         published = datetime.fromisoformat(rv["published_at"].replace("Z", "+00:00"))
         video = ChannelVideo(
             video_id=rv["video_id"],
@@ -109,8 +148,8 @@ async def check_channel(session: AsyncSession, channel: WatchedChannel) -> List[
             title=rv["title"],
             published_at=published,
             thumbnail=rv["thumbnail"],
-            topic_classification=classification.get("topic", "unknown"),
-            summary=classification.get("summary", ""),
+            topic_classification=cls.get("topic", "unknown"),
+            summary=cls.get("summary", ""),
         )
         session.add(video)
         new_videos.append(video)
