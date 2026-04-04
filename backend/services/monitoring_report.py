@@ -516,6 +516,18 @@ RULES:
     }
 
 
+def _truncate(text: str, max_chars: int) -> str:
+    """Truncate text at a word boundary, appending an ellipsis if cut."""
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    # Only rsplit if there is a space to split on, else hard cut
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut + "…"
+
+
 def _format_with_python(
     state_row: NarrativeState,
     state: Dict[str, Any],
@@ -527,24 +539,46 @@ def _format_with_python(
     # Build narrative_angles from narratives
     narrative_angles = []
     for n in narratives:
-        # Collect channels from group_coverage
-        channels_pushing = []
-        categories_involved = []
+        # Collect channels from group_coverage (dedupe, preserve order)
+        channels_pushing: List[str] = []
+        categories_involved: List[str] = []
+        seen_channels: set[str] = set()
+        seen_categories: set[str] = set()
         for grp, cov in n.get("group_coverage", {}).items():
-            categories_involved.append(grp)
-            channels_pushing.extend(cov.get("top_channels", []))
+            if grp and grp not in seen_categories:
+                seen_categories.add(grp)
+                categories_involved.append(grp)
+            for ch in cov.get("top_channels", []):
+                if ch and ch not in seen_channels:
+                    seen_channels.add(ch)
+                    channels_pushing.append(ch)
+
+        # Dedupe, truncate, and cap key_claims to top 3 (each ≤120 chars)
+        seen_claim_texts: set[str] = set()
+        capped_claims: List[str] = []
+        for c in (n.get("key_claims") or []):
+            claim_text = c.get("claim", "") if isinstance(c, dict) else c
+            if not claim_text:
+                continue
+            norm = claim_text.strip().lower()
+            if norm in seen_claim_texts:
+                continue
+            seen_claim_texts.add(norm)
+            capped_claims.append(_truncate(claim_text, 120))
+            if len(capped_claims) >= 3:
+                break
+
+        # Truncate description to ~280 chars at word boundary
+        desc = _truncate(n.get("description") or "", 280)
 
         narrative_angles.append({
             "title": n.get("title", ""),
             "sentiment": n.get("sentiment", "mixed"),
             "video_count": n.get("video_count", 0),
             "total_views": n.get("total_views", 0),
-            "description": n.get("description", ""),
-            "key_claims": [
-                (c["claim"] if isinstance(c, dict) else c)
-                for c in (n.get("key_claims") or [])
-            ],
-            "channels_pushing": channels_pushing[:10],
+            "description": desc,
+            "key_claims": capped_claims,
+            "channels_pushing": channels_pushing[:5],
             "categories_involved": categories_involved,
             "top_videos": n.get("top_videos", [])[:5],
         })
@@ -582,21 +616,31 @@ def _format_with_python(
             "notable_channels": [],
         })
 
-    # Build key_claims_tracked from all narratives
+    # Build key_claims_tracked from all narratives (truncate each ≤140 chars, dedupe)
     all_claims = []
     seen_claims: set[str] = set()
     for n in narratives:
         for c in n.get("key_claims", []):
             if isinstance(c, dict):
                 claim_text = c.get("claim", "")
-                if claim_text not in seen_claims:
-                    seen_claims.add(claim_text)
-                    all_claims.append({
-                        "claim": claim_text,
-                        "videos_making_claim": n.get("video_count", 0),
-                        "channels": c.get("sources", []),
-                        "assessment": c.get("assessment", "Unverified"),
-                    })
+                sources = c.get("sources", []) or []
+                assessment = c.get("assessment", "Unverified")
+            else:
+                claim_text = c or ""
+                sources = []
+                assessment = "Unverified"
+            if not claim_text:
+                continue
+            norm = claim_text.strip().lower()
+            if norm in seen_claims:
+                continue
+            seen_claims.add(norm)
+            all_claims.append({
+                "claim": _truncate(claim_text, 140),
+                "videos_making_claim": n.get("video_count", 0),
+                "channels": sources[:5],
+                "assessment": assessment,
+            })
 
     total_views = sum(n.get("total_views", 0) for n in narratives)
     # Fallback: use group_summaries views if narrative views are all 0

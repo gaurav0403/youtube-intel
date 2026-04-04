@@ -283,27 +283,27 @@ Extract narratives from these videos. Return JSON:
 {{
     "narratives": [
         {{
-            "title": "Specific narrative title",
+            "title": "Specific narrative title (max 12 words)",
             "slug": "url-safe-slug",
             "sentiment": "positive|negative|neutral|mixed",
             "importance_score": <1-10>,
             "video_count": <number of videos in this narrative>,
             "total_views": <sum of views>,
-            "description": "2-3 sentences on what this narrative claims and how it's framed",
+            "description": "ONE sentence, max 25 words, describing the core story and framing",
             "key_claims": [
-                {{"claim": "specific claim", "sources": ["channel1"], "assessment": "Verified|Unverified|Misleading"}}
+                {{"claim": "specific claim (max 15 words)", "sources": ["channel1"], "assessment": "Verified|Unverified|Misleading"}}
             ],
             "group_coverage": {{
                 "{group_name}": {{
                     "video_count": <number>,
                     "views": <total views>,
-                    "framing": "How this group frames it",
+                    "framing": "How this group frames it (max 20 words)",
                     "bias_signal": "pro-government|critical|neutral|mixed",
                     "top_channels": ["channel1", "channel2"]
                 }}
             }},
             "top_videos": [
-                {{"video_id": "real ID", "title": "real title", "channel": "name", "views": <number>, "why": "Why it matters"}}
+                {{"video_id": "real ID", "title": "real title", "channel": "name", "views": <number>, "why": "Why it matters (max 12 words)"}}
             ],
             "velocity": "rising|stable|declining"
         }}
@@ -311,12 +311,12 @@ Extract narratives from these videos. Return JSON:
     "group_summary": {{
         "group": "{group_name}",
         "video_count": {len(videos)},
-        "dominant_narrative": "Main story this group is covering",
-        "framing": "How this group frames stories",
+        "dominant_narrative": "Main story this group is covering (max 15 words)",
+        "framing": "How this group frames stories (max 20 words)",
         "bias_signal": "pro-government|critical|neutral|mixed"
     }},
     "emerging_stories": [
-        {{"topic": "Story just starting", "first_seen": "ISO timestamp", "channels_covering": ["ch1"]}}
+        {{"topic": "Story just starting (max 12 words)", "first_seen": "ISO timestamp", "channels_covering": ["ch1"]}}
     ]
 }}
 
@@ -324,7 +324,10 @@ RULES:
 - Max 8 narratives per chunk
 - All video_ids must be real IDs from the data
 - Max 5 top_videos per narrative
-- Be specific with claims and framing
+- Max 3 key_claims per narrative, each under 15 words
+- description MUST be exactly ONE sentence, max 25 words
+- Be specific and concise — no filler phrases, no hedging
+- Do NOT repeat the title inside the description
 """
     text, cost = await generate(
         prompt=prompt,
