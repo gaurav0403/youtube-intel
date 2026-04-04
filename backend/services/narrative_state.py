@@ -547,38 +547,59 @@ def _compute_group_summaries(
     narratives: List[Dict],
     by_group: Dict[str, List[Dict]],
 ) -> Dict[str, Dict]:
-    """Compute per-group summary statistics from narratives and raw video data."""
+    """Compute per-group summary statistics from narratives and raw video data.
+
+    For dominant_narrative, picks the narrative where this group has the
+    highest *share* of coverage relative to other groups. This avoids every
+    group showing the same global top narrative.
+    """
+    from collections import Counter
+
+    # Pre-compute total video count per narrative for share calculation
+    narr_totals = {
+        narr.get("id", i): narr.get("video_count", 0)
+        for i, narr in enumerate(narratives)
+    }
+
     summaries = {}
     for group_name in ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]:
         group_videos = by_group.get(group_name, [])
         total_views = sum(v.get("view_count", 0) for v in group_videos)
 
-        # Find dominant narrative for this group
-        dominant = ""
-        max_coverage = 0
+        # Rank narratives by this group's coverage (video count in this group)
+        ranked: List[tuple[str, int, float]] = []  # (title, group_vids, share)
         for narr in narratives:
             coverage = narr.get("group_coverage", {}).get(group_name, {})
-            vc = coverage.get("video_count", 0)
-            if vc > max_coverage:
-                max_coverage = vc
-                dominant = narr.get("title", "")
+            group_vids = coverage.get("video_count", 0)
+            if group_vids == 0:
+                continue
+            narr_total = narr.get("video_count", 1) or 1
+            share = group_vids / narr_total  # what fraction of this narrative belongs to this group
+            ranked.append((narr.get("title", ""), group_vids, share))
+
+        # Sort by video count descending
+        ranked.sort(key=lambda x: x[1], reverse=True)
+
+        # Build descriptive dominant topic: show top 2 to differentiate groups
+        if len(ranked) >= 2:
+            dominant = f"{ranked[0][0]}; also: {ranked[1][0]}"
+        elif ranked:
+            dominant = ranked[0][0]
+        else:
+            dominant = ""
 
         # Aggregate framing from group_coverage across narratives
         framing_parts = []
         bias_signals = []
-        channels_set: set[str] = set()
         for narr in narratives:
             coverage = narr.get("group_coverage", {}).get(group_name, {})
             if coverage.get("framing"):
                 framing_parts.append(coverage["framing"])
             if coverage.get("bias_signal"):
                 bias_signals.append(coverage["bias_signal"])
-            for ch in coverage.get("top_channels", []):
-                channels_set.add(ch)
 
         # Determine dominant bias
         if bias_signals:
-            from collections import Counter
             bias_counts = Counter(bias_signals)
             dominant_bias = bias_counts.most_common(1)[0][0]
         else:
