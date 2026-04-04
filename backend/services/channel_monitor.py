@@ -173,21 +173,30 @@ async def check_channel(
         session.add(video)
         new_videos.append(video)
 
+    # Capture before commit — ORM objects expire after rollback
+    chan_id = channel.channel_id
+    latest_video_id = rss_videos[0]["video_id"] if rss_videos else None
+
     # Update channel's last_checked_at
     channel.last_checked_at = datetime.now(timezone.utc)
-    if rss_videos:
-        channel.last_video_id = rss_videos[0]["video_id"]
+    if latest_video_id:
+        channel.last_video_id = latest_video_id
 
     try:
         await session.commit()
     except IntegrityError:
         await session.rollback()
-        logger.debug("Duplicate video for %s, skipping batch", channel.channel_id)
-        # Still update last_checked_at after rollback
-        channel.last_checked_at = datetime.now(timezone.utc)
-        if rss_videos:
-            channel.last_video_id = rss_videos[0]["video_id"]
-        await session.commit()
+        logger.debug("Duplicate video for %s, skipping batch", chan_id)
+        # Re-fetch channel after rollback (ORM objects are expired)
+        ch_result = await session.execute(
+            select(WatchedChannel).where(WatchedChannel.channel_id == chan_id)
+        )
+        ch = ch_result.scalar_one_or_none()
+        if ch:
+            ch.last_checked_at = datetime.now(timezone.utc)
+            if latest_video_id:
+                ch.last_video_id = latest_video_id
+            await session.commit()
         return []
 
     return new_videos
