@@ -147,23 +147,27 @@ def _build_monitoring_prompt(
     for cat in sorted(cat_summary.keys()):
         channel_block += f"{cat}: {', '.join(cat_summary[cat])}\n"
 
-    # Group videos by category for the prompt
+    # Group videos by category for the prompt — cap at 5 per category, 80 total
     by_cat: Dict[str, List[Dict]] = {}
     for v in videos:
         by_cat.setdefault(v["category"], []).append(v)
 
     video_block = ""
+    total_in_prompt = 0
     for cat in sorted(by_cat.keys()):
-        cat_vids = by_cat[cat][:10]  # Top 10 per category
-        video_block += f"\n=== {cat.upper()} ({len(by_cat[cat])} videos) ===\n"
+        cat_vids = by_cat[cat][:5]
+        video_block += f"\n=== {cat.upper()} ({len(by_cat[cat])} videos total) ===\n"
         for v in cat_vids:
-            transcript_excerpt = transcripts.get(v["video_id"], "")[:400]
+            if total_in_prompt >= 80:
+                break
+            transcript_excerpt = transcripts.get(v["video_id"], "")[:300]
             video_block += (
                 f"[{v['video_id']}] \"{v['title']}\" by {v['channel_name']} "
                 f"| {v['view_count']:,} views | {v['like_count']:,} likes | {v['comment_count']:,} comments\n"
             )
             if transcript_excerpt:
                 video_block += f"  Transcript: {transcript_excerpt}\n"
+            total_in_prompt += 1
 
     total_views = sum(v["view_count"] for v in videos)
 
