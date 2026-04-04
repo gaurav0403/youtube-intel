@@ -134,9 +134,10 @@ async def check_channel(
     if not rss_videos:
         return []
 
-    # Get existing video IDs for this channel
+    # Get existing video IDs (global check to avoid UNIQUE constraint violations)
+    candidate_ids = [rv["video_id"] for rv in rss_videos]
     result = await session.execute(
-        select(ChannelVideo.video_id).where(ChannelVideo.channel_id == channel.channel_id)
+        select(ChannelVideo.video_id).where(ChannelVideo.video_id.in_(candidate_ids))
     )
     existing_ids = {row[0] for row in result.fetchall()}
 
