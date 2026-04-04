@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import select
 
@@ -528,6 +529,81 @@ def _truncate(text: str, max_chars: int) -> str:
     return cut + "…"
 
 
+_CLAIM_NORMALIZE_RE = re.compile(r"[^\w\s]")
+_CLAIM_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_claim(text: str) -> str:
+    """Normalize claim text for fuzzy dedup (lowercase, strip punctuation)."""
+    if not text:
+        return ""
+    t = _CLAIM_NORMALIZE_RE.sub(" ", text.lower())
+    return _CLAIM_WHITESPACE_RE.sub(" ", t).strip()
+
+
+# Ordered from most to least trustworthy assessment
+_ASSESS_PRIORITY: Dict[str, int] = {
+    "Verified": 4,
+    "Partially True": 3,
+    "Contested": 2,
+    "Unverified": 1,
+    "Misleading": 0,
+}
+
+
+def _claim_rank_key(claim: Any) -> Tuple[int, int, int]:
+    """Sort key for ranking claims: more sources, better assessment, shorter text first.
+
+    Used with reverse=True so larger tuples come first. We negate length so that
+    shorter (more specific) claims win ties.
+    """
+    if isinstance(claim, dict):
+        sources = claim.get("sources") or []
+        assessment = claim.get("assessment", "Unverified")
+        text = claim.get("claim", "") or ""
+    else:
+        sources = []
+        assessment = "Unverified"
+        text = claim or ""
+    return (
+        len(sources),
+        _ASSESS_PRIORITY.get(assessment, 1),
+        -len(text),
+    )
+
+
+def _dedup_and_rank_claims(claims: List[Any]) -> List[Dict[str, Any]]:
+    """Dedupe (by normalized text) and rank a list of claim entries.
+
+    Accepts either dict-form claims or plain strings. Returns a list of dicts
+    with a consistent shape: {claim, sources, assessment}.
+    """
+    seen: set[str] = set()
+    normalized: List[Dict[str, Any]] = []
+    for c in claims or []:
+        if isinstance(c, dict):
+            text = (c.get("claim") or "").strip()
+            sources = list(c.get("sources") or [])
+            assessment = c.get("assessment", "Unverified")
+        else:
+            text = (c or "").strip()
+            sources = []
+            assessment = "Unverified"
+        if not text:
+            continue
+        key = _normalize_claim(text)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        normalized.append({
+            "claim": text,
+            "sources": sources,
+            "assessment": assessment,
+        })
+    normalized.sort(key=_claim_rank_key, reverse=True)
+    return normalized
+
+
 def _format_with_python(
     state_row: NarrativeState,
     state: Dict[str, Any],
@@ -553,20 +629,12 @@ def _format_with_python(
                     seen_channels.add(ch)
                     channels_pushing.append(ch)
 
-        # Dedupe, truncate, and cap key_claims to top 3 (each ≤120 chars)
-        seen_claim_texts: set[str] = set()
-        capped_claims: List[str] = []
-        for c in (n.get("key_claims") or []):
-            claim_text = c.get("claim", "") if isinstance(c, dict) else c
-            if not claim_text:
-                continue
-            norm = claim_text.strip().lower()
-            if norm in seen_claim_texts:
-                continue
-            seen_claim_texts.add(norm)
-            capped_claims.append(_truncate(claim_text, 120))
-            if len(capped_claims) >= 3:
-                break
+        # Dedupe + rank + cap key_claims. Return up to 20 (frontend shows 5
+        # with a "show all" expander). Each claim text truncated to 120 chars.
+        ranked_claims = _dedup_and_rank_claims(n.get("key_claims") or [])
+        capped_claims: List[str] = [
+            _truncate(c["claim"], 120) for c in ranked_claims[:20]
+        ]
 
         # Truncate description to ~280 chars at word boundary
         desc = _truncate(n.get("description") or "", 280)
@@ -616,31 +684,36 @@ def _format_with_python(
             "notable_channels": [],
         })
 
-    # Build key_claims_tracked from all narratives (truncate each ≤140 chars, dedupe)
-    all_claims = []
-    seen_claims: set[str] = set()
+    # Build key_claims_tracked — dedupe across all narratives, rank, then cap.
+    # Each claim carries the parent narrative's video_count for context.
+    pooled_claims: List[Dict[str, Any]] = []
     for n in narratives:
-        for c in n.get("key_claims", []):
-            if isinstance(c, dict):
-                claim_text = c.get("claim", "")
-                sources = c.get("sources", []) or []
-                assessment = c.get("assessment", "Unverified")
-            else:
-                claim_text = c or ""
-                sources = []
-                assessment = "Unverified"
-            if not claim_text:
-                continue
-            norm = claim_text.strip().lower()
-            if norm in seen_claims:
-                continue
-            seen_claims.add(norm)
-            all_claims.append({
-                "claim": _truncate(claim_text, 140),
-                "videos_making_claim": n.get("video_count", 0),
-                "channels": sources[:5],
-                "assessment": assessment,
+        video_count = n.get("video_count", 0)
+        for c in _dedup_and_rank_claims(n.get("key_claims") or []):
+            pooled_claims.append({
+                **c,
+                "video_count": video_count,
             })
+    # Re-dedupe across narratives (the same claim may exist under multiple)
+    # and re-rank by (source count, assessment, brevity).
+    seen_pool: set[str] = set()
+    unique_claims: List[Dict[str, Any]] = []
+    for c in pooled_claims:
+        key = _normalize_claim(c["claim"])
+        if key in seen_pool:
+            continue
+        seen_pool.add(key)
+        unique_claims.append(c)
+    unique_claims.sort(key=_claim_rank_key, reverse=True)
+    all_claims = [
+        {
+            "claim": _truncate(c["claim"], 140),
+            "videos_making_claim": c.get("video_count", 0),
+            "channels": (c.get("sources") or [])[:5],
+            "assessment": c.get("assessment", "Unverified"),
+        }
+        for c in unique_claims[:15]
+    ]
 
     total_views = sum(n.get("total_views", 0) for n in narratives)
     # Fallback: use group_summaries views if narrative views are all 0
@@ -666,7 +739,7 @@ def _format_with_python(
         "total_views": total_views,
         "narrative_angles": narrative_angles,
         "group_analysis": group_analysis,
-        "key_claims_tracked": all_claims[:10],
+        "key_claims_tracked": all_claims,
         "sentiment_overview": {
             "overall": sentiment.get("overall", "mixed"),
             "pro_government_pct": sentiment.get("pro_government_pct", 0),

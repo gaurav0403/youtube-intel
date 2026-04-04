@@ -135,7 +135,12 @@ function SentimentBar({ label, pct, color }: { label: string; pct: number; color
 
 function NarrativeCard({ angle, idx }: { angle: MonitoringNarrative; idx: number }) {
   const [open, setOpen] = useState(idx === 0);
+  const [showAllClaims, setShowAllClaims] = useState(false);
   const sentBg = SENT_BG[angle.sentiment] || SENT_BG.neutral;
+  const CLAIMS_COLLAPSED = 5;
+  const claims = angle.key_claims || [];
+  const visibleClaims = showAllClaims ? claims : claims.slice(0, CLAIMS_COLLAPSED);
+  const hasMoreClaims = claims.length > CLAIMS_COLLAPSED;
 
   return (
     <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
@@ -168,14 +173,24 @@ function NarrativeCard({ angle, idx }: { angle: MonitoringNarrative; idx: number
           )}
 
           {/* Key Claims */}
-          {angle.key_claims?.length > 0 && (
+          {claims.length > 0 && (
             <div className="space-y-1">
-              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Key Claims</div>
+              <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+                Key Claims {claims.length > 0 && <span className="text-gray-400 font-normal normal-case">({claims.length})</span>}
+              </div>
               <ul className="text-xs text-gray-600 space-y-1">
-                {angle.key_claims.map((c, i) => (
+                {visibleClaims.map((c, i) => (
                   <li key={i} className="flex items-start gap-1.5"><span className="text-red-400 mt-0.5">-</span> {c}</li>
                 ))}
               </ul>
+              {hasMoreClaims && (
+                <button
+                  onClick={() => setShowAllClaims((v) => !v)}
+                  className="text-[11px] text-red-600 hover:text-red-700 font-medium mt-1 no-print"
+                >
+                  {showAllClaims ? "Show less" : `Show all ${claims.length} claims`}
+                </button>
+              )}
             </div>
           )}
 

@@ -18,13 +18,18 @@ from backend.config import settings
 from backend.database import async_session
 from backend.models import ChannelVideo, NarrativeState, WatchedChannel
 from backend.services.gemini_client import extract_json, generate
-from backend.services.monitoring_report import MACRO_GROUPS
+from backend.services.monitoring_report import (
+    MACRO_GROUPS,
+    _claim_rank_key,
+    _normalize_claim,
+)
 
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 100  # videos per Gemini chunk call
 MAX_NARRATIVES = 15
 MAX_TOP_VIDEOS = 5
+MAX_CLAIMS_PER_NARRATIVE = 50  # hard cap to prevent unbounded growth via incremental updates
 
 BATCH_SYSTEM_INSTRUCTION = (
     "You are an intelligence analyst monitoring Indian YouTube news channels. "
@@ -352,11 +357,22 @@ def _merge_chunk_outputs(chunks: List[Dict]) -> Dict:
                 # Merge counts
                 existing["video_count"] = existing.get("video_count", 0) + narr.get("video_count", 0)
                 existing["total_views"] = existing.get("total_views", 0) + narr.get("total_views", 0)
-                # Merge claims (dedupe by claim text)
-                existing_claims = {c["claim"] for c in existing.get("key_claims", [])}
+                # Merge claims with normalized-text dedup
+                existing_claim_keys = {
+                    _normalize_claim(
+                        c.get("claim", "") if isinstance(c, dict) else str(c)
+                    )
+                    for c in existing.get("key_claims", [])
+                }
                 for claim in narr.get("key_claims", []):
-                    if claim["claim"] not in existing_claims:
-                        existing.setdefault("key_claims", []).append(claim)
+                    claim_text = (
+                        claim.get("claim", "") if isinstance(claim, dict) else str(claim)
+                    )
+                    key = _normalize_claim(claim_text)
+                    if not key or key in existing_claim_keys:
+                        continue
+                    existing_claim_keys.add(key)
+                    existing.setdefault("key_claims", []).append(claim)
                 # Merge group coverage
                 for grp, cov in narr.get("group_coverage", {}).items():
                     if grp not in existing.get("group_coverage", {}):
@@ -395,6 +411,12 @@ def _merge_chunk_outputs(chunks: List[Dict]) -> Dict:
         key=lambda n: n.get("importance_score", 0) * n.get("total_views", 0),
         reverse=True,
     )
+
+    # Rank and cap key_claims per narrative to prevent unbounded growth
+    for narr in narratives:
+        claims = narr.get("key_claims") or []
+        claims.sort(key=_claim_rank_key, reverse=True)
+        narr["key_claims"] = claims[:MAX_CLAIMS_PER_NARRATIVE]
 
     # Assign IDs
     for i, narr in enumerate(narratives):
@@ -831,18 +853,33 @@ def _apply_incremental_merge(
             if upd.get("velocity_change"):
                 narr["velocity"] = upd["velocity_change"]
 
-            # Append new claims
-            existing_claims = {
-                (c["claim"] if isinstance(c, dict) else c)
+            # Append new claims with normalized-text dedup
+            existing_claim_keys = {
+                _normalize_claim(
+                    c.get("claim", "") if isinstance(c, dict) else str(c)
+                )
                 for c in narr.get("key_claims", [])
             }
             for claim in upd.get("new_claims", []):
-                claim_text = claim["claim"] if isinstance(claim, dict) else claim
-                if claim_text not in existing_claims:
-                    narr.setdefault("key_claims", []).append(claim)
+                claim_text = (
+                    claim.get("claim", "") if isinstance(claim, dict) else claim
+                )
+                key = _normalize_claim(claim_text)
+                if not key or key in existing_claim_keys:
+                    continue
+                existing_claim_keys.add(key)
+                narr.setdefault("key_claims", []).append(claim)
 
             if upd.get("framing_update"):
                 narr["description"] = upd["framing_update"]
+
+    # Rank and cap key_claims per narrative to prevent unbounded growth
+    # across many incremental updates.
+    for narr in narr_by_id.values():
+        claims = narr.get("key_claims") or []
+        if len(claims) > MAX_CLAIMS_PER_NARRATIVE:
+            claims.sort(key=_claim_rank_key, reverse=True)
+            narr["key_claims"] = claims[:MAX_CLAIMS_PER_NARRATIVE]
 
     # Replace narratives, sorted by importance * views, capped
     state["narratives"] = sorted(
