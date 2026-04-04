@@ -36,9 +36,11 @@ app.add_middleware(
 
 from backend.api.routes_youtube import router as youtube_router  # noqa: E402
 from backend.api.routes_channels import router as channels_router  # noqa: E402
+from backend.api.routes_monitoring import router as monitoring_router  # noqa: E402
 
 app.include_router(youtube_router)
 app.include_router(channels_router)
+app.include_router(monitoring_router)
 
 
 @app.get("/health")

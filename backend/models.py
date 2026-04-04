@@ -44,6 +44,19 @@ class WatchedChannel(Base):
     thumbnail: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
 
+class MonitoringReport(Base):
+    __tablename__ = "monitoring_reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    hours: Mapped[int] = mapped_column(Integer, default=24)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    video_count: Mapped[int] = mapped_column(Integer, default=0)
+    channel_count: Mapped[int] = mapped_column(Integer, default=0)
+    gemini_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    report_json: Mapped[dict] = mapped_column(JSON)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class ChannelVideo(Base):
     __tablename__ = "channel_videos"
     __table_args__ = (

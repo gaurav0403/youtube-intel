@@ -85,8 +85,21 @@ export default function HomePage() {
         </div>
       </form>
 
-      {/* Channel Monitor CTA */}
-      <div className="max-w-2xl mx-auto">
+      {/* Quick Links */}
+      <div className="max-w-2xl mx-auto space-y-3">
+        <Link
+          href="/monitoring"
+          className="flex items-center gap-4 bg-white border border-red-200 rounded-xl p-4 hover:bg-red-50 transition-colors"
+        >
+          <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center">
+            <TrendingUp className="w-5 h-5 text-red-600" />
+          </div>
+          <div className="flex-1">
+            <div className="text-sm font-semibold text-gray-800">Monitoring Report</div>
+            <div className="text-xs text-gray-500">What are your 70+ channels saying right now? Narrative analysis across all tracked channels.</div>
+          </div>
+          <ArrowRight className="w-4 h-4 text-gray-300" />
+        </Link>
         <Link
           href="/channels"
           className="flex items-center gap-4 bg-white border border-gray-200 rounded-xl p-4 hover:bg-gray-50 transition-colors"

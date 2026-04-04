@@ -128,6 +128,87 @@ export interface ChannelVideoItem {
   detected_at: string;
 }
 
+// ─── Monitoring report types ────────────────────────────────────────────────
+
+export interface MonitoringNarrative {
+  title: string;
+  description: string;
+  sentiment: "positive" | "negative" | "neutral" | "mixed";
+  video_count: number;
+  channels_pushing: string[];
+  categories_involved: string[];
+  key_claims: string[];
+  top_videos: { video_id: string; title: string; channel: string; views: number }[];
+}
+
+export interface MonitoringCategoryBreakdown {
+  category: string;
+  video_count: number;
+  primary_focus: string;
+  notable_framing: string;
+}
+
+export interface MonitoringChannelHighlight {
+  channel_name: string;
+  category: string;
+  videos_published: number;
+  primary_topic: string;
+  stance: string;
+}
+
+export interface MonitoringAnalysis {
+  headline: string;
+  executive_summary: string;
+  dominant_narratives: MonitoringNarrative[];
+  category_breakdown: MonitoringCategoryBreakdown[];
+  channel_highlights: MonitoringChannelHighlight[];
+  emerging_stories: { topic: string; early_signals: string; channels_covering: string[] }[];
+  sentiment_overview: {
+    overall: string;
+    pro_government_pct: number;
+    critical_pct: number;
+    neutral_pct: number;
+    most_polarizing_topic: string;
+  };
+  notable_absences: string;
+  error?: string;
+  raw?: string;
+}
+
+export interface MonitoringReport {
+  id?: number;
+  hours: number;
+  generated_at: string;
+  video_count: number;
+  channel_count: number;
+  videos: {
+    video_id: string;
+    title: string;
+    channel_id: string;
+    channel_name: string;
+    category: string;
+    subscriber_count: number;
+    published_at: string;
+    thumbnail: string;
+    view_count: number;
+    topic_classification: string;
+    summary: string;
+  }[];
+  analysis: MonitoringAnalysis | null;
+  gemini_cost_usd: number;
+  error?: string | null;
+}
+
+export interface MonitoringReportSummary {
+  id: number;
+  hours: number;
+  generated_at: string;
+  video_count: number;
+  channel_count: number;
+  gemini_cost_usd: number;
+  has_error: boolean;
+}
+
 // ─── API functions ───────────────────────────────────────────────────────────
 
 async function postAPI<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -162,4 +243,12 @@ export const api = {
     fetchAPI<ChannelVideoItem[]>(`/api/channels/feed?limit=${limit}`),
   pollChannels: () =>
     postAPI<{ channels_checked: number; new_videos: number }>("/api/channels/poll"),
+
+  // Monitoring Reports
+  generateMonitoringReport: (hours = 24) =>
+    postAPI<MonitoringReport>("/api/monitoring/generate", { hours }),
+  getMonitoringReports: (limit = 20) =>
+    fetchAPI<MonitoringReportSummary[]>(`/api/monitoring/reports?limit=${limit}`),
+  getMonitoringReportById: (id: number) =>
+    fetchAPI<MonitoringReport>(`/api/monitoring/reports/${id}`),
 };
