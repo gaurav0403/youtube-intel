@@ -15,15 +15,78 @@ from backend.services.youtube_transcript import get_transcripts_batch_async
 
 logger = logging.getLogger(__name__)
 
+# ─── 4 macro groups ─────────────────────────────────────────────────────────
+
+MACRO_GROUPS: Dict[str, str] = {
+    # Mainstream Media
+    "Mainstream News": "Mainstream Media",
+    "Mainstream Digital": "Mainstream Media",
+    "Government Official": "Mainstream Media",
+    "Global News": "Mainstream Media",
+    "Global / India Policy": "Mainstream Media",
+    "Geopolitics / Global": "Mainstream Media",
+    # Independent & Digital
+    "Independent Commentator": "Independent & Digital",
+    "Independent Journalism": "Independent & Digital",
+    "Independent / Critical": "Independent & Digital",
+    "Independent / Explainer": "Independent & Digital",
+    "Independent Commentary": "Independent & Digital",
+    "Independent": "Independent & Digital",
+    "Digital News": "Independent & Digital",
+    "Digital Journalism": "Independent & Digital",
+    "Critical Commentary": "Independent & Digital",
+    "Right-Leaning Commentary": "Independent & Digital",
+    "Nationalist Commentary": "Independent & Digital",
+    "Political Interviews": "Independent & Digital",
+    "Political Satire": "Independent & Digital",
+    "Fact-Checking / Social": "Independent & Digital",
+    "Ground Reporting": "Independent & Digital",
+    "Media Criticism": "Independent & Digital",
+    "Public Opinion": "Independent & Digital",
+    "Social Issues": "Independent & Digital",
+    "Social/Dalit Issues": "Independent & Digital",
+    "Agrarian Politics": "Independent & Digital",
+    "Investigative": "Independent & Digital",
+    "Legal / Political": "Independent & Digital",
+    "Political Magazine": "Independent & Digital",
+    # Regional
+    "Regional (Tamil)": "Regional",
+    "Regional (Malayalam)": "Regional",
+    "Regional (Telugu)": "Regional",
+    "Regional (Kannada)": "Regional",
+    "Regional (Marathi)": "Regional",
+    "Regional (Bengali)": "Regional",
+    "Regional (Punjabi)": "Regional",
+    "Regional (Hindi Belt)": "Regional",
+    "Regional (Odia)": "Regional",
+    "Regional (South)": "Regional",
+    "Regional News": "Regional",
+    "South India Focus": "Regional",
+    "South-centric Policy": "Regional",
+    # Specialist & Policy
+    "Defense / Strategy": "Specialist & Policy",
+    "Defense / Nationalism": "Specialist & Policy",
+    "Geopolitics": "Specialist & Policy",
+    "Geopolitics / Strategy": "Specialist & Policy",
+    "Policy / Geopolitics": "Specialist & Policy",
+    "Policy / Case Studies": "Specialist & Policy",
+    "Economic Policy": "Specialist & Policy",
+    "Finance / Policy": "Specialist & Policy",
+    "Think Tank / Policy": "Specialist & Policy",
+    "Data Journalism": "Specialist & Policy",
+    "Electoral Data": "Specialist & Policy",
+    "Deep Analysis": "Specialist & Policy",
+    "Regional Strategy": "Specialist & Policy",
+}
+
+
+def _get_macro_group(category: str) -> str:
+    """Map a fine-grained category to one of 4 macro groups."""
+    return MACRO_GROUPS.get(category, "Independent & Digital")
+
 
 async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
-    """Generate a narrative monitoring report across all tracked channels.
-
-    1. Pull all videos from monitored channels in the time window
-    2. Enrich top videos with view counts via YouTube API
-    3. Fetch transcripts (free)
-    4. Feed to Gemini for narrative analysis
-    """
+    """Generate a narrative monitoring report across all tracked channels."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
     # Step 1: Get recent videos and channel info
@@ -35,6 +98,7 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
             ch.channel_id: {
                 "name": ch.channel_name,
                 "category": ch.category or "Uncategorized",
+                "group": _get_macro_group(ch.category or "Uncategorized"),
                 "subscriber_count": ch.subscriber_count,
                 "thumbnail": ch.thumbnail,
             }
@@ -60,7 +124,7 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
             "error": f"No videos found from monitored channels in the last {hours}h. Try polling first.",
         }
 
-    # Build video data
+    # Build video data with group assignment
     video_data = []
     channels_seen = set()
     for v in videos:
@@ -72,6 +136,7 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
             "channel_id": v.channel_id,
             "channel_name": ch_info.get("name", "Unknown"),
             "category": ch_info.get("category", "Uncategorized"),
+            "group": ch_info.get("group", "Independent & Digital"),
             "subscriber_count": ch_info.get("subscriber_count", 0),
             "published_at": v.published_at.isoformat() if v.published_at else "",
             "thumbnail": v.thumbnail or "",
@@ -82,7 +147,7 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
             "summary": v.summary or "",
         })
 
-    # Step 2: Enrich top 50 videos with view/like/comment counts via YouTube API
+    # Step 2: Enrich top 50 videos with view/like/comment counts
     from backend.services.youtube_client import YouTubeClient
     yt = YouTubeClient()
     try:
@@ -98,7 +163,7 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
     finally:
         await yt.close()
 
-    # Sort by views for display
+    # Sort by views
     video_data.sort(key=lambda x: x["view_count"], reverse=True)
 
     # Step 3: Fetch transcripts for top 30 by views (free)
@@ -111,9 +176,10 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
         prompt=prompt,
         system_instruction=(
             "You are an intelligence analyst monitoring Indian YouTube news channels. "
-            "Produce a structured report showing how different channel groups cover the same stories. "
-            "Be specific — cite real video titles, channels, and view counts. "
-            "Focus on framing differences, bias patterns, and narrative divergence between groups."
+            "Channels are organized into 4 groups: Mainstream Media, Independent & Digital, "
+            "Regional, and Specialist & Policy. Produce a structured report comparing how "
+            "these 4 groups cover the same stories differently. Be specific — cite real "
+            "video titles, channels, and view counts. Focus on framing differences and bias."
         ),
     )
     analysis = extract_json(result_text)
@@ -137,27 +203,32 @@ def _build_monitoring_prompt(
 ) -> str:
     """Build the Gemini prompt for monitoring report."""
 
-    # Group channels by category
-    cat_summary: Dict[str, List[str]] = {}
+    # Build channel roster by macro group
+    by_group: Dict[str, List[str]] = {}
     for cid, ch in channels.items():
-        cat = ch.get("category", "Uncategorized")
-        cat_summary.setdefault(cat, []).append(ch["name"])
+        g = ch.get("group", "Independent & Digital")
+        by_group.setdefault(g, []).append(
+            f"{ch['name']} [{ch.get('category', '')}] ({ch.get('subscriber_count', 0):,} subs)"
+        )
 
-    channel_block = "=== CHANNEL GROUPS ===\n"
-    for cat in sorted(cat_summary.keys()):
-        channel_block += f"{cat}: {', '.join(cat_summary[cat])}\n"
+    channel_block = "=== CHANNEL ROSTER (4 GROUPS) ===\n"
+    for g in ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]:
+        names = by_group.get(g, [])
+        channel_block += f"\n{g} ({len(names)} channels):\n"
+        for n in names:
+            channel_block += f"  - {n}\n"
 
-    # Group videos by category for the prompt — cap at 5 per category, 80 total
-    by_cat: Dict[str, List[Dict]] = {}
+    # Group videos by macro group — top 20 per group
+    vid_by_group: Dict[str, List[Dict]] = {}
     for v in videos:
-        by_cat.setdefault(v["category"], []).append(v)
+        vid_by_group.setdefault(v["group"], []).append(v)
 
     video_block = ""
     total_in_prompt = 0
-    for cat in sorted(by_cat.keys()):
-        cat_vids = by_cat[cat][:5]
-        video_block += f"\n=== {cat.upper()} ({len(by_cat[cat])} videos total) ===\n"
-        for v in cat_vids:
+    for g in ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]:
+        gvids = vid_by_group.get(g, [])
+        video_block += f"\n=== {g.upper()} ({len(gvids)} videos total) ===\n"
+        for v in gvids[:20]:
             if total_in_prompt >= 80:
                 break
             transcript_excerpt = transcripts.get(v["video_id"], "")[:300]
@@ -174,6 +245,12 @@ def _build_monitoring_prompt(
     return f"""Analyze the last {hours}h of content from {len(channels)} monitored Indian YouTube channels.
 {len(videos)} videos detected. Total views: {total_views:,}.
 
+Channels are organized into 4 groups:
+1. MAINSTREAM MEDIA — Major TV news, government channels, global English news
+2. INDEPENDENT & DIGITAL — Independent commentators, digital-first outlets, political commentary
+3. REGIONAL — Regional language news channels across India
+4. SPECIALIST & POLICY — Defense, geopolitics, economics, think tanks, data journalism
+
 {channel_block}
 
 {video_block}
@@ -182,18 +259,18 @@ Produce a JSON intelligence report with this EXACT structure:
 
 {{
     "headline": "One crisp headline (under 15 words) about the dominant story",
-    "executive_summary": "3-4 sentences. What's dominating? How are different groups framing it? Any notable silence?",
+    "executive_summary": "3-4 sentences. What's dominating? How do the 4 groups frame it differently? Any notable silence?",
     "total_views": {total_views},
     "narrative_angles": [
         {{
             "title": "Narrative title (specific, not generic)",
             "sentiment": "positive|negative|neutral|mixed",
             "video_count": <number>,
-            "total_views": <sum of views for videos in this narrative>,
+            "total_views": <sum of views>,
             "description": "2-3 sentences on what this narrative claims and how it's framed",
             "key_claims": ["specific claim 1", "specific claim 2"],
             "channels_pushing": ["channel1", "channel2"],
-            "categories_involved": ["Mainstream News", "Independent Commentator"],
+            "categories_involved": ["Mainstream Media", "Independent & Digital"],
             "top_videos": [
                 {{
                     "video_id": "real ID from data",
@@ -207,12 +284,12 @@ Produce a JSON intelligence report with this EXACT structure:
     ],
     "group_analysis": [
         {{
-            "group": "Mainstream News",
-            "channel_count": <number>,
+            "group": "Mainstream Media",
+            "channel_count": <number of channels that published>,
             "video_count": <number>,
             "total_views": <number>,
             "dominant_topic": "What they're mostly covering",
-            "framing": "How they frame the dominant stories",
+            "framing": "How they frame the dominant stories — 2-3 sentences",
             "bias_signal": "pro-government|critical|neutral|mixed",
             "notable_channels": [
                 {{
@@ -221,6 +298,18 @@ Produce a JSON intelligence report with this EXACT structure:
                     "stance": "Brief stance description"
                 }}
             ]
+        }},
+        {{
+            "group": "Independent & Digital",
+            ...
+        }},
+        {{
+            "group": "Regional",
+            ...
+        }},
+        {{
+            "group": "Specialist & Policy",
+            ...
         }}
     ],
     "key_claims_tracked": [
@@ -255,11 +344,11 @@ Produce a JSON intelligence report with this EXACT structure:
 
 REQUIREMENTS:
 - At least 5 narrative angles, sorted by total_views descending
-- group_analysis for EVERY channel category that published videos
+- EXACTLY 4 entries in group_analysis: Mainstream Media, Independent & Digital, Regional, Specialist & Policy
 - At least 5 key claims tracked with real assessment
-- All video_ids MUST be real IDs from the data
+- All video_ids MUST be real IDs from the data above
 - Be SPECIFIC — use actual video titles, channel names, view counts
-- Focus on HOW different groups frame the same story differently
-- Identify when mainstream and independent channels diverge
+- Focus on HOW the 4 groups frame the same story differently
+- Highlight when Mainstream and Independent groups diverge on framing
 - Note which groups amplify government narratives vs which are critical
 """
