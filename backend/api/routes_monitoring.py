@@ -18,12 +18,14 @@ logger = logging.getLogger(__name__)
 @router.post("/api/monitoring/generate")
 async def generate_report(
     hours: int = Query(24, ge=1, le=168),
-    format_pass: bool = Query(True),
+    format_pass: bool = Query(False),
 ):
     """Generate a monitoring report.
 
     Prefers state-based generation if an active NarrativeState exists.
     Falls back to legacy stateless generation otherwise.
+    format_pass=False (default) uses instant Python formatting (~0s, free).
+    format_pass=True uses a Gemini call for polished prose (~10s, ~$0.02).
     """
     now = datetime.now(timezone.utc)
 

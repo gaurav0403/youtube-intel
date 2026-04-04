@@ -290,7 +290,7 @@ export const api = {
     postAPI<{ channels_checked: number; new_videos: number }>("/api/channels/poll"),
 
   // Monitoring Reports
-  generateMonitoringReport: (hours = 24, formatPass = true) =>
+  generateMonitoringReport: (hours = 24, formatPass = false) =>
     postAPI<MonitoringReport & { state_based?: boolean; state_id?: number }>("/api/monitoring/generate", { hours, format_pass: formatPass }),
   getMonitoringReports: (limit = 20) =>
     fetchAPI<MonitoringReportSummary[]>(`/api/monitoring/reports?limit=${limit}`),
