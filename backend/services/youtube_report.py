@@ -54,12 +54,13 @@ async def _run_report(
     # Time filter
     after = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Step 1: Search (3 queries, deduplicate)
+    # Step 1: Search (viewCount first for prominent videos, then relevance)
+    # 50 results per call × 2 orders = ~100 unique videos
     seen_ids: set[str] = set()
     all_videos: List[Dict] = []
 
-    for order in ["relevance", "date", "viewCount"]:
-        results = await yt.search_videos(topic, max_results=10, order=order, published_after=after)
+    for order in ["viewCount", "relevance"]:
+        results = await yt.search_videos(topic, max_results=50, order=order, published_after=after)
         for v in results:
             if v["video_id"] not in seen_ids:
                 seen_ids.add(v["video_id"])
@@ -88,8 +89,8 @@ async def _run_report(
     # Sort by views descending
     videos.sort(key=lambda x: x.get("view_count", 0), reverse=True)
 
-    # Step 3: Transcripts (free, top 15) — runs in thread pool
-    top_ids = [v["video_id"] for v in videos[:15]]
+    # Step 3: Transcripts (free, top 30) — runs in thread pool
+    top_ids = [v["video_id"] for v in videos[:30]]
     transcripts = await get_transcripts_batch_async(top_ids)
 
     # Step 4: Comments for top 10 videos
