@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from sqlalchemy import select
 
+from backend.config import settings
 from backend.database import async_session
 from backend.models import ChannelVideo, WatchedChannel
 from backend.services.gemini_client import extract_json, generate
@@ -170,8 +171,16 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
     transcript_ids = [v["video_id"] for v in video_data[:30]]
     transcripts = await get_transcripts_batch_async(transcript_ids)
 
+    # Stage 1: Summarize transcripts via Haiku (if API key configured)
+    haiku_cost = 0.0
+    if settings.anthropic_api_key:
+        from backend.services.haiku_client import summarize_transcripts_batch
+        summaries, haiku_cost = await summarize_transcripts_batch(video_data[:30], transcripts)
+    else:
+        summaries = {}
+
     # Step 4: Gemini analysis
-    prompt = _build_monitoring_prompt(hours, video_data, transcripts, channels)
+    prompt = _build_monitoring_prompt(hours, video_data, transcripts, channels, summaries)
     result_text, gemini_cost = await generate(
         prompt=prompt,
         system_instruction=(
@@ -191,6 +200,7 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
         "videos": video_data,
         "analysis": analysis,
         "gemini_cost_usd": gemini_cost,
+        "haiku_cost_usd": haiku_cost,
         "youtube_units_used": yt.units_used,
     }
 
@@ -200,6 +210,7 @@ def _build_monitoring_prompt(
     videos: List[Dict],
     transcripts: Dict[str, str],
     channels: Dict[str, Dict],
+    summaries: Dict[str, str] | None = None,
 ) -> str:
     """Build the Gemini prompt for monitoring report."""
 
@@ -231,7 +242,8 @@ def _build_monitoring_prompt(
         for v in gvids[:20]:
             if total_in_prompt >= 80:
                 break
-            transcript_excerpt = transcripts.get(v["video_id"], "")[:300]
+            summary = (summaries or {}).get(v["video_id"], "")
+            transcript_excerpt = summary or transcripts.get(v["video_id"], "")[:300]
             video_block += (
                 f"[{v['video_id']}] \"{v['title']}\" by {v['channel_name']} "
                 f"| {v['view_count']:,} views | {v['like_count']:,} likes | {v['comment_count']:,} comments\n"

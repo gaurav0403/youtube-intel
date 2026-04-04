@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
 
+    # Anthropic (Haiku transcript summarization)
+    anthropic_api_key: str = ""
+
     # Server
     cors_origins: str = "*"
     api_key: str = ""
