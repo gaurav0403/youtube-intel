@@ -500,7 +500,45 @@ RULES:
     )
     analysis = extract_json(text)
 
-    total_views = sum(n.get("total_views", 0) for n in narratives)
+    # Overlay persisted exec_summary / key_judgments from state (generated
+    # once during batch build) and compute framing_divergence deterministically.
+    persisted_summary = (state.get("executive_summary") or "").strip()
+    if persisted_summary:
+        analysis["executive_summary"] = persisted_summary
+    analysis["key_judgments"] = state.get("key_judgments") or []
+    analysis["framing_divergence"] = _compute_framing_divergence(narratives)
+
+    # Stitch notable_channels from state onto each group in analysis, and
+    # attach group_count to each narrative_angle for the N/4 chip.
+    group_notables = {
+        g_name: (g.get("notable_channels") or [])
+        for g_name, g in (group_summaries or {}).items()
+    }
+    for g in analysis.get("group_analysis") or []:
+        notable_from_state = group_notables.get(g.get("group"), [])
+        if notable_from_state:
+            g["notable_channels"] = [
+                {
+                    "name": c.get("name", ""),
+                    "videos": c.get("videos", 0),
+                    "views": c.get("views", 0),
+                    "stance": c.get("stance", ""),
+                }
+                for c in notable_from_state
+                if c.get("name")
+            ]
+
+    narr_by_title = {
+        (n.get("title") or "").strip().lower(): n for n in narratives
+    }
+    for a in analysis.get("narrative_angles") or []:
+        key = (a.get("title") or "").strip().lower()
+        source = narr_by_title.get(key)
+        if source:
+            a["group_count"] = sum(
+                1 for grp in _GROUP_ORDER
+                if ((source.get("group_coverage") or {}).get(grp) or {}).get("video_count", 0) > 0
+            )
 
     return {
         "hours": 24,
@@ -604,6 +642,79 @@ def _dedup_and_rank_claims(claims: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+_GROUP_ORDER = ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]
+
+
+def _compute_framing_divergence(narratives: List[Dict]) -> Dict[str, Any]:
+    """Compute convergence buckets + top divergent stories from group_coverage.
+
+    Pure Python — no LLM. Buckets narratives by how many of the 4 macro
+    groups are covering them. A "divergent" narrative is one that >= 2 groups
+    cover but with conflicting bias signals; top_divergent is ranked by
+    total_views so the most visible splits float up.
+    """
+    universal: List[Dict[str, Any]] = []
+    majority: List[Dict[str, Any]] = []
+    silo: List[Dict[str, Any]] = []
+    divergent_candidates: List[Dict[str, Any]] = []
+
+    for n in narratives or []:
+        gc = n.get("group_coverage") or {}
+        # Only count the 4 canonical macro groups so stray keys don't inflate
+        active_groups = [
+            g for g in _GROUP_ORDER
+            if (gc.get(g) or {}).get("video_count", 0) > 0
+        ]
+        count = len(active_groups)
+        if count == 0:
+            continue
+
+        title = n.get("title", "")
+        total_views = n.get("total_views", 0) or 0
+        bucket_entry = {"title": title, "total_views": total_views, "groups": count}
+
+        if count == 4:
+            universal.append(bucket_entry)
+        elif count >= 2:
+            majority.append(bucket_entry)
+        else:
+            silo.append(bucket_entry)
+
+        # Divergence check: >=2 groups cover it AND bias signals differ
+        if count >= 2:
+            biases: List[str] = []
+            group_cells: Dict[str, Optional[Dict[str, Any]]] = {}
+            for g in _GROUP_ORDER:
+                cov = gc.get(g) or {}
+                if cov.get("video_count", 0) > 0:
+                    bias = (cov.get("bias_signal") or "neutral").strip() or "neutral"
+                    biases.append(bias)
+                    group_cells[g] = {
+                        "bias": bias,
+                        "videos": cov.get("video_count", 0),
+                    }
+                else:
+                    group_cells[g] = None
+            if len(set(biases)) >= 2:
+                divergent_candidates.append({
+                    "title": title,
+                    "total_views": total_views,
+                    "groups": group_cells,
+                })
+
+    universal.sort(key=lambda x: x["total_views"], reverse=True)
+    majority.sort(key=lambda x: x["total_views"], reverse=True)
+    silo.sort(key=lambda x: x["total_views"], reverse=True)
+    divergent_candidates.sort(key=lambda x: x["total_views"], reverse=True)
+
+    return {
+        "universal": universal,
+        "majority": majority,
+        "silo": silo,
+        "top_divergent": divergent_candidates[:3],
+    }
+
+
 def _format_with_python(
     state_row: NarrativeState,
     state: Dict[str, Any],
@@ -639,6 +750,13 @@ def _format_with_python(
         # Truncate description to ~280 chars at word boundary
         desc = _truncate(n.get("description") or "", 280)
 
+        # Count how many of the 4 canonical macro groups actually cover this
+        # narrative (not just which group keys exist on the dict).
+        group_count = sum(
+            1 for g in _GROUP_ORDER
+            if ((n.get("group_coverage") or {}).get(g) or {}).get("video_count", 0) > 0
+        )
+
         narrative_angles.append({
             "title": n.get("title", ""),
             "sentiment": n.get("sentiment", "mixed"),
@@ -648,6 +766,7 @@ def _format_with_python(
             "key_claims": capped_claims,
             "channels_pushing": channels_pushing[:5],
             "categories_involved": categories_involved,
+            "group_count": group_count,
             "top_videos": n.get("top_videos", [])[:5],
         })
 
@@ -673,6 +792,20 @@ def _format_with_python(
         else:
             dominant_topic = gs.get("dominant_narrative", "")
 
+        # notable_channels is persisted on group_summaries during batch build.
+        # Older states pre-dating that change may lack it — fall back to [].
+        notable_from_state = gs.get("notable_channels") or []
+        notable_channels = [
+            {
+                "name": c.get("name", ""),
+                "videos": c.get("videos", 0),
+                "views": c.get("views", 0),
+                "stance": c.get("stance", ""),
+            }
+            for c in notable_from_state
+            if c.get("name")
+        ]
+
         group_analysis.append({
             "group": grp_name,
             "channel_count": gs.get("channel_count", 0),
@@ -681,7 +814,7 @@ def _format_with_python(
             "dominant_topic": dominant_topic,
             "framing": gs.get("framing", ""),
             "bias_signal": gs.get("bias_signal", "neutral"),
-            "notable_channels": [],
+            "notable_channels": notable_channels,
         })
 
     # Build key_claims_tracked — dedupe across all narratives, rank, then cap.
@@ -723,12 +856,18 @@ def _format_with_python(
     # Build headline from top narrative
     headline = narratives[0]["title"] if narratives else "No active narratives"
 
-    # Build executive summary
-    top_titles = [n["title"] for n in narratives[:3]]
-    exec_summary = (
-        f"Analysis of {state_row.total_videos_processed} videos across "
-        f"{state_row.total_channels} channels. Top narratives: {', '.join(top_titles)}."
-    )
+    # Prefer the Gemini-written exec summary + judgments persisted in state;
+    # fall back to a deterministic template if the batch didn't produce them.
+    exec_summary = (state.get("executive_summary") or "").strip()
+    key_judgments = state.get("key_judgments") or []
+    if not exec_summary:
+        top_titles = [n["title"] for n in narratives[:3]]
+        exec_summary = (
+            f"Analysis of {state_row.total_videos_processed} videos across "
+            f"{state_row.total_channels} channels. Top narratives: {', '.join(top_titles)}."
+        )
+
+    framing_divergence = _compute_framing_divergence(narratives)
 
     sentiment = state.get("sentiment_overview", {})
     trending = state.get("trending_signals", {})
@@ -736,6 +875,8 @@ def _format_with_python(
     analysis = {
         "headline": headline,
         "executive_summary": exec_summary,
+        "key_judgments": key_judgments,
+        "framing_divergence": framing_divergence,
         "total_views": total_views,
         "narrative_angles": narrative_angles,
         "group_analysis": group_analysis,

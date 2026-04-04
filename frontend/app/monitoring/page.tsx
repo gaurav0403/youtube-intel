@@ -9,6 +9,7 @@ import {
   type MonitoringVideo,
   type MonitoringNarrative,
   type MonitoringGroupAnalysis,
+  type FramingDivergence,
   type NarrativeStateInfo,
 } from "@/lib/api";
 import { formatNumber, formatIST } from "@/lib/utils";
@@ -16,8 +17,15 @@ import {
   ArrowLeft, Loader2, Zap, Clock, AlertTriangle, TrendingUp, TrendingDown,
   Minus, Eye, ThumbsUp, MessageSquare, ExternalLink, ChevronDown, ChevronUp,
   BarChart2, Users, Flame, Search, Download, Brain, Play, Video,
-  CheckCircle, XCircle, HelpCircle,
+  CheckCircle, XCircle, HelpCircle, Network, GitCompareArrows,
 } from "lucide-react";
+
+const GROUP_ORDER = [
+  "Mainstream Media",
+  "Independent & Digital",
+  "Regional",
+  "Specialist & Policy",
+] as const;
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
@@ -141,6 +149,15 @@ function NarrativeCard({ angle, idx }: { angle: MonitoringNarrative; idx: number
   const claims = angle.key_claims || [];
   const visibleClaims = showAllClaims ? claims : claims.slice(0, CLAIMS_COLLAPSED);
   const hasMoreClaims = claims.length > CLAIMS_COLLAPSED;
+  const groupCount = angle.group_count ?? angle.categories_involved?.length ?? 0;
+  const groupChipColor =
+    groupCount >= 4
+      ? "bg-emerald-100 text-emerald-700"
+      : groupCount >= 2
+      ? "bg-blue-100 text-blue-700"
+      : groupCount === 1
+      ? "bg-amber-100 text-amber-700"
+      : "bg-gray-100 text-gray-500";
 
   return (
     <div className="border border-gray-200 rounded-xl overflow-hidden bg-white">
@@ -153,6 +170,11 @@ function NarrativeCard({ angle, idx }: { angle: MonitoringNarrative; idx: number
             <span className="text-xs font-bold text-gray-400">#{idx + 1}</span>
             <span className="text-sm font-semibold text-gray-800">{angle.title}</span>
             <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium capitalize ${sentBg}`}>{angle.sentiment}</span>
+            {groupCount > 0 && (
+              <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium flex items-center gap-0.5 ${groupChipColor}`}>
+                <Network className="w-2.5 h-2.5" /> {groupCount}/4 groups
+              </span>
+            )}
             <span className="text-[10px] text-gray-400">{angle.video_count} videos · {formatNumber(angle.total_views || 0)} views</span>
           </div>
           {!open && <p className="text-xs text-gray-500 truncate">{angle.description}</p>}
@@ -227,41 +249,142 @@ function NarrativeCard({ angle, idx }: { angle: MonitoringNarrative; idx: number
   );
 }
 
-function GroupRow({ group }: { group: MonitoringGroupAnalysis }) {
-  const [open, setOpen] = useState(false);
+function GroupPulseCard({ group }: { group: MonitoringGroupAnalysis }) {
   const biasBg = BIAS_COLOR[group.bias_signal] || BIAS_COLOR.neutral;
+  const notable = (group.notable_channels || []).slice(0, 3);
+  return (
+    <div className="border border-gray-200 rounded-xl p-4 bg-white flex flex-col gap-2.5">
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="text-sm font-semibold text-gray-800 leading-tight">{group.group}</h3>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium capitalize shrink-0 ${biasBg}`}>
+          {group.bias_signal}
+        </span>
+      </div>
+      <div className="text-[11px] text-gray-500">
+        {group.video_count} videos · {formatNumber(group.total_views || 0)} views · {group.channel_count} channels
+      </div>
+      {group.dominant_topic && (
+        <div>
+          <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Dominant</div>
+          <p className="text-xs text-gray-700 leading-snug line-clamp-2">{group.dominant_topic}</p>
+        </div>
+      )}
+      {group.framing && (
+        <p className="text-[11px] text-gray-500 leading-snug line-clamp-3">{group.framing}</p>
+      )}
+      {notable.length > 0 && (
+        <div className="pt-1 border-t border-gray-100">
+          <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Top channels</div>
+          <div className="space-y-0.5">
+            {notable.map((ch) => (
+              <div key={ch.name} className="flex items-center gap-1.5 text-[11px]">
+                <span className="font-medium text-gray-700 truncate">{ch.name}</span>
+                <span className="text-gray-400 shrink-0">({ch.videos})</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FramingDivergenceSection({ data }: { data: FramingDivergence }) {
+  const [showSilo, setShowSilo] = useState(false);
+  const universalCount = data.universal?.length ?? 0;
+  const majorityCount = data.majority?.length ?? 0;
+  const siloCount = data.silo?.length ?? 0;
+  const topDivergent = data.top_divergent || [];
+
+  // If nothing to show, hide entire section
+  if (!topDivergent.length && !universalCount && !majorityCount && !siloCount) {
+    return null;
+  }
 
   return (
-    <div className="border-b border-gray-100 last:border-0">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 transition-colors"
-      >
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-semibold text-gray-800">{group.group}</span>
-            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium capitalize ${biasBg}`}>{group.bias_signal}</span>
-            <span className="text-[10px] text-gray-400">
-              {group.video_count} videos · {formatNumber(group.total_views || 0)} views · {group.channel_count} channels
-            </span>
-          </div>
-          <p className="text-xs text-gray-500 mt-0.5 truncate">{group.dominant_topic}</p>
+    <div className="bg-white border border-gray-200 rounded-2xl p-5">
+      <h2 className="font-semibold text-gray-800 flex items-center gap-2 mb-4">
+        <GitCompareArrows className="w-4 h-4 text-indigo-500" /> Framing Divergence
+      </h2>
+
+      {/* Convergence counts */}
+      <div className="flex flex-wrap gap-2 mb-4">
+        <div className="text-[11px] px-2.5 py-1 bg-emerald-50 border border-emerald-200 rounded-full">
+          <span className="font-semibold text-emerald-700">{universalCount}</span>
+          <span className="text-emerald-600"> universal</span>
         </div>
-        {open ? <ChevronUp className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
-      </button>
-      {open && (
-        <div className="px-4 pb-3 space-y-2">
-          <p className="text-xs text-gray-600">{group.framing}</p>
-          {group.notable_channels?.length > 0 && (
-            <div className="space-y-1">
-              {group.notable_channels.map((ch) => (
-                <div key={ch.name} className="flex items-center gap-2 text-xs">
-                  <span className="font-medium text-gray-700">{ch.name}</span>
-                  <span className="text-gray-400">({ch.videos} videos)</span>
-                  <span className="text-gray-500">— {ch.stance}</span>
-                </div>
-              ))}
+        <div className="text-[11px] px-2.5 py-1 bg-blue-50 border border-blue-200 rounded-full">
+          <span className="font-semibold text-blue-700">{majorityCount}</span>
+          <span className="text-blue-600"> majority</span>
+        </div>
+        <div className="text-[11px] px-2.5 py-1 bg-amber-50 border border-amber-200 rounded-full">
+          <span className="font-semibold text-amber-700">{siloCount}</span>
+          <span className="text-amber-600"> silo</span>
+        </div>
+      </div>
+
+      {/* Top divergent narratives */}
+      {topDivergent.length > 0 && (
+        <div className="space-y-3">
+          <div className="text-[10px] font-semibold text-gray-500 uppercase tracking-wide">
+            Top Divergent Stories — same story, different framing
+          </div>
+          {topDivergent.map((d, i) => (
+            <div key={i} className="border border-gray-200 rounded-xl p-3 bg-gray-50">
+              <div className="flex items-start justify-between gap-2 mb-2">
+                <p className="text-sm font-semibold text-gray-800">{d.title}</p>
+                <span className="text-[10px] text-gray-400 shrink-0">{formatNumber(d.total_views || 0)} views</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {GROUP_ORDER.map((g) => {
+                  const cell = d.groups?.[g];
+                  if (!cell) {
+                    return (
+                      <div key={g} className="rounded-lg bg-white border border-dashed border-gray-200 p-2">
+                        <div className="text-[10px] text-gray-400 truncate">{g}</div>
+                        <div className="text-[11px] text-gray-300 mt-0.5">—</div>
+                      </div>
+                    );
+                  }
+                  const biasBg = BIAS_COLOR[cell.bias] || BIAS_COLOR.neutral;
+                  return (
+                    <div key={g} className="rounded-lg bg-white border border-gray-200 p-2">
+                      <div className="text-[10px] text-gray-500 truncate">{g}</div>
+                      <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium capitalize ${biasBg}`}>
+                          {cell.bias}
+                        </span>
+                        <span className="text-[10px] text-gray-400">{cell.videos}v</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
+          ))}
+        </div>
+      )}
+
+      {/* Silo stories expander */}
+      {siloCount > 0 && (
+        <div className="mt-4 pt-3 border-t border-gray-100">
+          <button
+            onClick={() => setShowSilo((v) => !v)}
+            className="text-[11px] text-indigo-600 hover:text-indigo-700 font-medium no-print flex items-center gap-1"
+          >
+            {showSilo ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            {showSilo ? "Hide" : "Show"} silo stories ({siloCount})
+          </button>
+          {showSilo && (
+            <ul className="mt-2 space-y-1">
+              {(data.silo || []).map((s, i) => (
+                <li key={i} className="text-xs text-gray-600 flex items-center gap-2">
+                  <span className="w-1 h-1 rounded-full bg-amber-400 shrink-0" />
+                  <span className="truncate flex-1">{s.title}</span>
+                  <span className="text-[10px] text-gray-400 shrink-0">{formatNumber(s.total_views || 0)}</span>
+                </li>
+              ))}
+            </ul>
           )}
         </div>
       )}
@@ -393,12 +516,22 @@ function ReportView({ report }: { report: MonitoringReport }) {
         </div>
       </div>
 
-      {/* Executive Summary */}
+      {/* Executive Brief — prose + key judgments */}
       <div className="bg-white border border-gray-200 rounded-2xl p-5">
         <h2 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
-          <Brain className="w-4 h-4 text-red-500" /> Executive Summary
+          <Brain className="w-4 h-4 text-red-500" /> Executive Brief
         </h2>
         <p className="text-sm text-gray-700 leading-relaxed">{ai.executive_summary}</p>
+        {(ai.key_judgments?.length ?? 0) > 0 && (
+          <ul className="mt-3 space-y-1.5">
+            {ai.key_judgments!.map((j, i) => (
+              <li key={i} className="flex gap-2 text-sm">
+                <span className="text-red-500 font-bold shrink-0">▸</span>
+                <span className="text-gray-700">{j}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       {/* Stats row */}
@@ -424,6 +557,25 @@ function ReportView({ report }: { report: MonitoringReport }) {
           <div className="text-xs text-gray-500">Channels</div>
         </div>
       </div>
+
+      {/* Group Pulse — what each group is doing (4-col grid) */}
+      {(ai.group_analysis?.length ?? 0) > 0 && (
+        <div className="bg-white border border-gray-200 rounded-2xl p-5">
+          <h2 className="font-semibold text-gray-800 flex items-center gap-2 mb-4">
+            <Users className="w-4 h-4 text-green-500" /> Group Pulse
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            {ai.group_analysis.map((g, i) => (
+              <GroupPulseCard key={i} group={g} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Framing Divergence — how the 4 groups diverge on the same stories */}
+      {ai.framing_divergence && (
+        <FramingDivergenceSection data={ai.framing_divergence} />
+      )}
 
       {/* Sentiment + Trending side by side */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -480,20 +632,6 @@ function ReportView({ report }: { report: MonitoringReport }) {
               <NarrativeCard key={i} angle={angle} idx={i} />
             ))}
           </div>
-        </div>
-      )}
-
-      {/* Group Analysis (what each group is doing) */}
-      {(ai.group_analysis?.length ?? 0) > 0 && (
-        <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-800 flex items-center gap-2">
-              <Users className="w-4 h-4 text-green-500" /> What Each Group Is Doing
-            </h2>
-          </div>
-          {ai.group_analysis.map((g, i) => (
-            <GroupRow key={i} group={g} />
-          ))}
         </div>
       )}
 

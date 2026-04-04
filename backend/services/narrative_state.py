@@ -213,6 +213,16 @@ async def build_batch_state(hours: int = 24) -> Dict[str, Any]:
     # Step 7: Recompute group summaries
     merged["group_summaries"] = _compute_group_summaries(merged["narratives"], by_group)
 
+    # Step 7b: Generate briefing summary + key judgments via Gemini
+    try:
+        exec_summary, judgments, summary_cost = await _generate_brief_summary(
+            merged["narratives"], merged["group_summaries"]
+        )
+        total_gemini_cost += summary_cost
+    except Exception:
+        exec_summary, judgments = "", []
+        logger.exception("Brief summary generation failed — continuing without")
+
     # Step 8: Store as new NarrativeState
     now = datetime.now(timezone.utc)
     state_data = {
@@ -222,6 +232,8 @@ async def build_batch_state(hours: int = 24) -> Dict[str, Any]:
         "emerging_stories": merged.get("emerging_stories", []),
         "trending_signals": merged.get("trending_signals", {}),
         "notable_absences": merged.get("notable_absences", ""),
+        "executive_summary": exec_summary,
+        "key_judgments": judgments,
     }
 
     async with async_session() as db:
@@ -431,6 +443,83 @@ def _merge_chunk_outputs(chunks: List[Dict]) -> Dict:
     }
 
 
+async def _generate_brief_summary(
+    narratives: List[Dict],
+    group_summaries: Dict[str, Dict],
+) -> Tuple[str, List[str], float]:
+    """Generate executive_summary + key_judgments via a single Gemini call.
+
+    Returns (summary, judgments, cost_usd). On any failure the caller is
+    expected to fall back to the deterministic template.
+    """
+    if not narratives:
+        return "", [], 0.0
+
+    # Top 10 narratives — just title, video_count, sentiment, group shape
+    narr_compact: List[Dict[str, Any]] = []
+    for n in narratives[:10]:
+        gc = n.get("group_coverage") or {}
+        narr_compact.append({
+            "title": n.get("title", ""),
+            "video_count": n.get("video_count", 0),
+            "total_views": n.get("total_views", 0),
+            "sentiment": n.get("sentiment", "mixed"),
+            "groups_covering": [g for g, cov in gc.items() if cov.get("video_count", 0) > 0],
+        })
+
+    grp_compact: Dict[str, Dict[str, Any]] = {}
+    for g_name, g in (group_summaries or {}).items():
+        grp_compact[g_name] = {
+            "dominant_narrative": g.get("dominant_narrative", ""),
+            "bias_signal": g.get("bias_signal", "neutral"),
+            "framing": (g.get("framing") or "")[:300],
+            "video_count": g.get("video_count", 0),
+        }
+
+    prompt = f"""You are an intelligence analyst briefing a decision-maker on the last 24h
+of Indian YouTube news coverage. Write a tight analytical brief — no filler, no hedging.
+
+Top narratives:
+{json.dumps(narr_compact, indent=1)}
+
+How the 4 macro groups are covering the news:
+{json.dumps(grp_compact, indent=1)}
+
+Return JSON:
+{{
+    "executive_summary": "3-4 sentences. What is dominating? How do the 4 groups diverge in framing? Any striking silence or consensus? Be specific — name narratives, name groups.",
+    "key_judgments": [
+        "Sharp, specific analytical judgment (max 20 words)",
+        "Another judgment — name the groups, name the story",
+        "3-5 total bullets, each standalone and information-dense"
+    ]
+}}
+
+RULES:
+- executive_summary is polished prose that reads like an analyst's brief, not a data dump
+- Each key_judgment is a standalone analytic claim — specific, concrete, contrastive
+- Name real narratives and group names from the data above
+- Return 3-5 judgments, no more
+"""
+    text, cost = await generate(
+        prompt=prompt,
+        system_instruction=(
+            "You write concise analytical briefs for intelligence consumers. "
+            "Be specific, contrastive, and confident — no hedging, no filler."
+        ),
+        temperature=0.3,
+    )
+    result = extract_json(text)
+    summary = (result.get("executive_summary") or "").strip()
+    judgments_raw = result.get("key_judgments") or []
+    judgments: List[str] = [
+        str(j).strip()
+        for j in judgments_raw
+        if isinstance(j, (str, int, float)) and str(j).strip()
+    ][:5]
+    return summary, judgments, cost
+
+
 async def _deduplicate_narratives(state: Dict) -> Tuple[Dict, float]:
     """Use a lightweight Gemini call to merge similar narratives and add overview fields."""
     narrative_summaries = []
@@ -578,7 +667,7 @@ def _compute_group_summaries(
     highest *share* of coverage relative to other groups. This avoids every
     group showing the same global top narrative.
     """
-    from collections import Counter
+    from collections import Counter, defaultdict
 
     # Pre-compute total video count per narrative for share calculation
     narr_totals = {
@@ -590,6 +679,29 @@ def _compute_group_summaries(
     for group_name in ["Mainstream Media", "Independent & Digital", "Regional", "Specialist & Policy"]:
         group_videos = by_group.get(group_name, [])
         total_views = sum(v.get("view_count", 0) for v in group_videos)
+
+        # Rank channels by (video_count, total_views) within this group
+        ch_stats: Dict[str, Dict[str, Any]] = defaultdict(
+            lambda: {"videos": 0, "views": 0, "name": ""}
+        )
+        for v in group_videos:
+            key = v.get("channel_id") or v.get("channel_name", "")
+            if not key:
+                continue
+            ch_stats[key]["name"] = v.get("channel_name", "")
+            ch_stats[key]["videos"] += 1
+            ch_stats[key]["views"] += v.get("view_count", 0) or 0
+
+        notable = sorted(
+            ch_stats.values(),
+            key=lambda c: (c["videos"], c["views"]),
+            reverse=True,
+        )[:5]
+        notable_channels = [
+            {"name": c["name"], "videos": c["videos"], "views": c["views"]}
+            for c in notable
+            if c["name"]
+        ]
 
         # Rank narratives by this group's coverage (video count in this group)
         ranked: List[tuple[str, int, float]] = []  # (title, group_vids, share)
@@ -637,6 +749,7 @@ def _compute_group_summaries(
             "dominant_narrative": dominant,
             "framing": "; ".join(framing_parts[:3]) if framing_parts else "",
             "bias_signal": dominant_bias,
+            "notable_channels": notable_channels,
         }
 
     return summaries

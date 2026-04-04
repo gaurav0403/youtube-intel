@@ -140,6 +140,7 @@ export interface MonitoringNarrative {
   categories_involved: string[];
   key_claims: string[];
   top_videos: { video_id: string; title: string; channel: string; views: number; why: string }[];
+  group_count?: number;
 }
 
 export interface MonitoringGroupAnalysis {
@@ -150,12 +151,33 @@ export interface MonitoringGroupAnalysis {
   dominant_topic: string;
   framing: string;
   bias_signal: string;
-  notable_channels: { name: string; videos: number; stance: string }[];
+  notable_channels: { name: string; videos: number; stance?: string; views?: number }[];
+}
+
+export interface FramingDivergenceBucketItem {
+  title: string;
+  total_views: number;
+  groups: number;
+}
+
+export interface FramingDivergenceTopItem {
+  title: string;
+  total_views: number;
+  groups: Record<string, { bias: string; videos: number } | null>;
+}
+
+export interface FramingDivergence {
+  universal: FramingDivergenceBucketItem[];
+  majority: FramingDivergenceBucketItem[];
+  silo: FramingDivergenceBucketItem[];
+  top_divergent: FramingDivergenceTopItem[];
 }
 
 export interface MonitoringAnalysis {
   headline: string;
   executive_summary: string;
+  key_judgments?: string[];
+  framing_divergence?: FramingDivergence;
   total_views: number;
   narrative_angles: MonitoringNarrative[];
   group_analysis: MonitoringGroupAnalysis[];
