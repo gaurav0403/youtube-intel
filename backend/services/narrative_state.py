@@ -6,6 +6,7 @@ narrative state document, and applies incremental updates after each poll.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -60,6 +61,16 @@ def _slugify(title: str) -> str:
 
 # ─── Batch Processing ──────────────────────────────────────────────────────
 
+# Module-level guard so concurrent triggers of the batch builder (double-click
+# on the UI, duplicate cURL, background scheduler overlap) can't stack up
+# multiple 60+ chunk Gemini pipelines fighting for the same DB.
+_BATCH_LOCK = asyncio.Lock()
+
+
+def is_batch_build_in_progress() -> bool:
+    """True if a batch build is currently running."""
+    return _BATCH_LOCK.locked()
+
 
 async def build_batch_state(hours: int = 24) -> Dict[str, Any]:
     """Build a complete narrative state from ALL videos in the time window.
@@ -71,7 +82,19 @@ async def build_batch_state(hours: int = 24) -> Dict[str, Any]:
     5. Optional deduplication pass
     6. Selective transcript enrichment for top narratives
     7. Store as new NarrativeState row
+
+    Serialized via _BATCH_LOCK — a second concurrent call returns early with
+    a busy marker rather than queuing behind the in-flight build.
     """
+    if _BATCH_LOCK.locked():
+        logger.warning("Batch build already in progress — skipping duplicate trigger")
+        return {"error": "Batch build already in progress", "status": "busy"}
+
+    async with _BATCH_LOCK:
+        return await _build_batch_state_inner(hours)
+
+
+async def _build_batch_state_inner(hours: int) -> Dict[str, Any]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     total_gemini_cost = 0.0
     total_haiku_cost = 0.0
@@ -91,9 +114,12 @@ async def build_batch_state(hours: int = 24) -> Dict[str, Any]:
             for ch in ch_result.scalars().all()
         }
 
+        # Filter on published_at (when YouTube uploaded it), NOT detected_at
+        # (when our poller first saw it). Otherwise old videos from newly-added
+        # channels or RSS backfill leak into the window.
         vid_result = await db.execute(
             select(ChannelVideo)
-            .where(ChannelVideo.detected_at >= cutoff)
+            .where(ChannelVideo.published_at >= cutoff)
             .order_by(ChannelVideo.published_at.desc())
         )
         videos = vid_result.scalars().all()

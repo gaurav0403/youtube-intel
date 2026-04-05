@@ -115,10 +115,17 @@ async def trigger_batch_build(hours: int = Query(24, ge=1, le=168)):
     """Trigger a fresh batch narrative state build as a background task.
 
     Returns immediately with status=started. Poll GET /api/monitoring/state
-    to check when the build completes.
+    to check when the build completes. If a build is already in progress,
+    returns status=busy without starting a duplicate run.
     """
     import asyncio
-    from backend.services.narrative_state import build_batch_state
+    from backend.services.narrative_state import build_batch_state, is_batch_build_in_progress
+
+    if is_batch_build_in_progress():
+        return {
+            "status": "busy",
+            "message": "Batch build already in progress. Poll GET /api/monitoring/state to check progress.",
+        }
 
     async def _run_batch() -> None:
         try:

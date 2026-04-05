@@ -112,9 +112,12 @@ async def generate_monitoring_report(hours: int = 24) -> Dict[str, Any]:
             for ch in ch_result.scalars().all()
         }
 
+        # Filter on published_at (when YouTube uploaded it), NOT detected_at
+        # (when our poller first saw it). Otherwise old videos from newly-added
+        # channels or RSS backfill leak into the window.
         vid_result = await db.execute(
             select(ChannelVideo)
-            .where(ChannelVideo.detected_at >= cutoff)
+            .where(ChannelVideo.published_at >= cutoff)
             .order_by(ChannelVideo.published_at.desc())
         )
         videos = vid_result.scalars().all()
