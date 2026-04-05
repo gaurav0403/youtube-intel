@@ -38,6 +38,8 @@ async def generate_report(
                 "hours": state_result.get("hours", hours),
                 "generated_at": state_result.get("generated_at", now.isoformat()),
                 "video_count": state_result.get("video_count", 0),
+                "short_count": state_result.get("short_count", 0),
+                "long_count": state_result.get("long_count", 0),
                 "channel_count": state_result.get("channel_count", 0),
                 "videos": state_result.get("videos", []),
                 "analysis": state_result.get("analysis"),

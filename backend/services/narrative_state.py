@@ -60,6 +60,35 @@ def _slugify(title: str) -> str:
     return slug[:80]
 
 
+# ─── Shorts vs Long-form classification ────────────────────────────────────
+
+# Authoritative classifier is YouTube's duration field (<=60s → Short).
+# The title hashtag regex is a fallback for when the YouTube API is
+# unavailable (quota exhausted, network error) — catches the tagged ~60-70%.
+_SHORTS_TITLE_PATTERNS = re.compile(
+    r"#(?:yt)?shorts?\b|#atshorts\b|#shortvideo\b|#shortsvideo\b",
+    re.IGNORECASE,
+)
+_DURATION_PATTERN = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")
+SHORTS_MAX_SECONDS = 60  # YouTube's classic Shorts threshold
+
+
+def _parse_iso8601_duration(duration: str) -> int:
+    """Parse an ISO 8601 duration string (PT1M30S, PT45S, PT1H2M3S) into seconds."""
+    if not duration:
+        return 0
+    m = _DURATION_PATTERN.match(duration)
+    if not m:
+        return 0
+    h, mn, s = (int(x) if x else 0 for x in m.groups())
+    return h * 3600 + mn * 60 + s
+
+
+def _is_short_by_title(title: str) -> bool:
+    """Title-hashtag fallback classifier for Shorts when duration is unknown."""
+    return bool(_SHORTS_TITLE_PATTERNS.search(title or ""))
+
+
 # ─── Batch Processing ──────────────────────────────────────────────────────
 
 # Module-level guard so concurrent triggers of the batch builder (double-click
@@ -151,37 +180,82 @@ async def _build_batch_state_inner(hours: int) -> Dict[str, Any]:
             "summary": v.summary or "",
         })
 
-    # Step 1b: Enrich top 200 videos with real view counts from YouTube API
-    # videos.list costs 1 unit per 50 videos = 4 units for 200 videos
+    # Step 1b: Enrich EVERY video with view count + duration via YouTube API.
+    # videos.list with part=snippet,statistics,contentDetails costs 1 quota
+    # unit per 50 IDs → ~106 units for a 5000-video 24h window (trivial vs
+    # 10k daily quota). Duration drives Short (≤60s) vs Long-form (>60s)
+    # classification below. If the API is unavailable (quota exhausted or
+    # network error) we fall back to a title-hashtag heuristic.
     from backend.services.youtube_client import YouTubeClient
+
     yt = YouTubeClient()
+    details_map: Dict[str, Dict] = {}
     try:
-        top_ids = [v["video_id"] for v in video_data[:200]]
-        details = await yt.get_video_details(top_ids)
-        details_map = {d["video_id"]: d for d in details}
-        enriched = 0
-        for v in video_data:
-            d = details_map.get(v["video_id"])
-            if d:
-                v["view_count"] = d.get("view_count", 0)
-                enriched += 1
-        # Also update DB records so future incremental updates have views
-        async with async_session() as db:
-            for v in video_data:
-                d = details_map.get(v["video_id"])
-                if d and d.get("view_count", 0) > 0:
-                    vid_result2 = await db.execute(
-                        select(ChannelVideo).where(ChannelVideo.video_id == v["video_id"])
-                    )
-                    row = vid_result2.scalar_one_or_none()
-                    if row:
-                        row.view_count = d["view_count"]
-            await db.commit()
-        logger.info("Enriched %d/%d videos with YouTube view counts (API units: %d)", enriched, len(video_data), yt.units_used)
+        id_batches: List[List[str]] = [
+            [v["video_id"] for v in video_data[i : i + 50]]
+            for i in range(0, len(video_data), 50)
+        ]
+        sem_yt = asyncio.Semaphore(8)
+
+        async def _fetch_batch(ids: List[str]) -> List[Dict]:
+            async with sem_yt:
+                try:
+                    return await yt.get_video_details(ids)
+                except Exception:
+                    logger.warning("videos.list batch failed (%d ids)", len(ids))
+                    return []
+
+        batch_outcomes = await asyncio.gather(
+            *(_fetch_batch(b) for b in id_batches)
+        )
+        for outcome in batch_outcomes:
+            for d in outcome:
+                details_map[d["video_id"]] = d
+
+        # Write fresh view counts back to DB so incremental updates inherit
+        # them and downstream ranking sees real numbers on cold starts.
+        if details_map:
+            async with async_session() as db:
+                for video_id, d in details_map.items():
+                    vc = d.get("view_count", 0)
+                    if vc > 0:
+                        await db.execute(
+                            update(ChannelVideo)
+                            .where(ChannelVideo.video_id == video_id)
+                            .values(view_count=vc)
+                        )
+                await db.commit()
+        logger.info(
+            "Enriched %d/%d videos (API units: %d)",
+            len(details_map), len(video_data), yt.units_used,
+        )
     except Exception:
-        logger.exception("View count enrichment failed (non-fatal)")
+        logger.exception("Video enrichment failed (non-fatal, title heuristic fallback engaged)")
     finally:
         await yt.close()
+
+    # Step 1c: Classify each video as Short (≤60s) or Long-form (>60s).
+    short_count = 0
+    long_count = 0
+    for v in video_data:
+        d = details_map.get(v["video_id"])
+        if d:
+            v["view_count"] = d.get("view_count", v["view_count"])
+            dur = _parse_iso8601_duration(d.get("duration", ""))
+            v["duration_sec"] = dur
+            v["is_short"] = 0 < dur <= SHORTS_MAX_SECONDS
+        else:
+            v["duration_sec"] = 0
+            v["is_short"] = _is_short_by_title(v["title"])
+        if v["is_short"]:
+            short_count += 1
+        else:
+            long_count += 1
+    logger.info(
+        "Video classification: %d long-form, %d Shorts (%.0f%% shorts)",
+        long_count, short_count,
+        (100.0 * short_count / max(len(video_data), 1)),
+    )
 
     # Step 2: Partition by group
     by_group: Dict[str, List[Dict]] = {}
@@ -281,6 +355,8 @@ async def _build_batch_state_inner(hours: int) -> Dict[str, Any]:
         "notable_absences": merged.get("notable_absences", ""),
         "executive_summary": exec_summary,
         "key_judgments": judgments,
+        "short_count": short_count,
+        "long_count": long_count,
     }
 
     async with async_session() as db:
@@ -317,6 +393,8 @@ async def _build_batch_state_inner(hours: int) -> Dict[str, Any]:
     return {
         "state_id": new_state.id,
         "videos_processed": len(video_data),
+        "short_count": short_count,
+        "long_count": long_count,
         "narratives": len(state_data["narratives"]),
         "chunks": chunk_count,
         "gemini_cost_usd": total_gemini_cost,
@@ -727,6 +805,11 @@ def _compute_group_summaries(
         group_videos = by_group.get(group_name, [])
         total_views = sum(v.get("view_count", 0) for v in group_videos)
 
+        # Shorts vs Long-form breakdown for this group (classification was
+        # stamped onto each video dict during Step 1c of the batch build).
+        group_shorts = sum(1 for v in group_videos if v.get("is_short"))
+        group_longs = len(group_videos) - group_shorts
+
         # Rank channels by (video_count, total_views) within this group
         ch_stats: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {"videos": 0, "views": 0, "name": ""}
@@ -792,6 +875,8 @@ def _compute_group_summaries(
         summaries[group_name] = {
             "channel_count": len({v.get("channel_id") for v in group_videos}),
             "video_count": len(group_videos),
+            "short_count": group_shorts,
+            "long_count": group_longs,
             "views": total_views,
             "dominant_narrative": dominant,
             "framing": "; ".join(framing_parts[:3]) if framing_parts else "",

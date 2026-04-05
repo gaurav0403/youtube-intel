@@ -147,6 +147,8 @@ export interface MonitoringGroupAnalysis {
   group: string;
   channel_count: number;
   video_count: number;
+  short_count?: number;
+  long_count?: number;
   total_views: number;
   dominant_topic: string;
   framing: string;
@@ -226,6 +228,8 @@ export interface MonitoringReport {
   hours: number;
   generated_at: string;
   video_count: number;
+  short_count?: number;
+  long_count?: number;
   channel_count: number;
   videos: MonitoringVideo[];
   analysis: MonitoringAnalysis | null;

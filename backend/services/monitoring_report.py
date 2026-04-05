@@ -511,13 +511,17 @@ RULES:
     analysis["key_judgments"] = state.get("key_judgments") or []
     analysis["framing_divergence"] = _compute_framing_divergence(narratives)
 
-    # Stitch notable_channels from state onto each group in analysis, and
-    # attach group_count to each narrative_angle for the N/4 chip.
+    # Stitch notable_channels + Shorts/Long counts from state onto each group
+    # in analysis (Gemini doesn't see them), and attach group_count to each
+    # narrative_angle for the N/4 chip.
     group_notables = {
         g_name: (g.get("notable_channels") or [])
         for g_name, g in (group_summaries or {}).items()
     }
     for g in analysis.get("group_analysis") or []:
+        gs_row = (group_summaries or {}).get(g.get("group")) or {}
+        g["short_count"] = gs_row.get("short_count", 0)
+        g["long_count"] = gs_row.get("long_count", 0)
         notable_from_state = group_notables.get(g.get("group"), [])
         if notable_from_state:
             g["notable_channels"] = [
@@ -547,6 +551,8 @@ RULES:
         "hours": 24,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "video_count": state_row.total_videos_processed,
+        "short_count": state.get("short_count", 0),
+        "long_count": state.get("long_count", 0),
         "channel_count": state_row.total_channels,
         "videos": [],  # not included in state-based report (too large)
         "analysis": analysis,
@@ -813,6 +819,8 @@ def _format_with_python(
             "group": grp_name,
             "channel_count": gs.get("channel_count", 0),
             "video_count": gs.get("video_count", 0),
+            "short_count": gs.get("short_count", 0),
+            "long_count": gs.get("long_count", 0),
             "total_views": gs.get("views", 0),
             "dominant_topic": dominant_topic,
             "framing": gs.get("framing", ""),
@@ -911,6 +919,8 @@ def _format_with_python(
         "hours": 24,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "video_count": state_row.total_videos_processed,
+        "short_count": state.get("short_count", 0),
+        "long_count": state.get("long_count", 0),
         "channel_count": state_row.total_channels,
         "videos": [],
         "analysis": analysis,

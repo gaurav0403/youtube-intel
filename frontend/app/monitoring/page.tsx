@@ -263,6 +263,11 @@ function GroupPulseCard({ group }: { group: MonitoringGroupAnalysis }) {
       <div className="text-[11px] text-gray-500">
         {group.video_count} videos · {formatNumber(group.total_views || 0)} views · {group.channel_count} channels
       </div>
+      {(group.long_count ?? 0) + (group.short_count ?? 0) > 0 && (
+        <div className="text-[10px] text-gray-400 tabular-nums">
+          {group.long_count ?? 0} long · {group.short_count ?? 0} Shorts
+        </div>
+      )}
       {group.dominant_topic && (
         <div>
           <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Dominant</div>
@@ -506,7 +511,13 @@ function ReportView({ report }: { report: MonitoringReport }) {
         </div>
         <h1 className="text-xl font-bold mb-1">{ai.headline}</h1>
         <div className="flex items-center gap-3 text-xs text-red-200 flex-wrap">
-          <span>{report.video_count} videos · {formatNumber(totalViews)} views · {report.channel_count} channels</span>
+          <span>
+            {report.video_count} videos
+            {(report.long_count ?? 0) + (report.short_count ?? 0) > 0 && (
+              <> ({report.long_count ?? 0} long · {report.short_count ?? 0} Shorts)</>
+            )}
+            {" · "}{formatNumber(totalViews)} views · {report.channel_count} channels
+          </span>
           <span>·</span>
           <span>Last {report.hours}h</span>
           <span>·</span>
@@ -540,6 +551,11 @@ function ReportView({ report }: { report: MonitoringReport }) {
           <Video className="w-4 h-4 text-red-500 mx-auto mb-1" />
           <div className="text-xl font-bold text-gray-800">{report.video_count}</div>
           <div className="text-xs text-gray-500">Videos</div>
+          {(report.long_count ?? 0) + (report.short_count ?? 0) > 0 && (
+            <div className="mt-1 text-[10px] text-gray-400 tabular-nums">
+              {report.long_count ?? 0} long · {report.short_count ?? 0} Shorts
+            </div>
+          )}
         </div>
         <div className="bg-white border border-gray-200 rounded-xl p-4 text-center">
           <Eye className="w-4 h-4 text-blue-500 mx-auto mb-1" />
