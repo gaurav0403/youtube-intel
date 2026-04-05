@@ -28,6 +28,7 @@ from backend.services.monitoring_report import (
 logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 100  # videos per Gemini chunk call
+BATCH_CHUNK_CONCURRENCY = 8  # max chunks running Gemini in parallel
 MAX_NARRATIVES = 15
 MAX_TOP_VIDEOS = 5
 MAX_CLAIMS_PER_NARRATIVE = 50  # hard cap to prevent unbounded growth via incremental updates
@@ -193,24 +194,44 @@ async def _build_batch_state_inner(hours: int) -> Dict[str, Any]:
         len(by_group),
     )
 
-    # Step 3: Chunk and call Gemini per chunk
-    all_chunk_results: List[Dict] = []
-    chunk_count = 0
-
+    # Step 3: Build chunk jobs and run in parallel with bounded concurrency.
+    # Each chunk is an independent Gemini call (~60s @ 100 videos) so serial
+    # processing scales linearly to hour-long batches. A bounded semaphore
+    # lets multiple chunks run concurrently without hammering the Gemini
+    # quota or tripping the 300s per-call timeout.
+    chunk_jobs: List[Tuple[int, str, List[Dict]]] = []
     for group_name, group_videos in by_group.items():
         for i in range(0, len(group_videos), CHUNK_SIZE):
-            chunk = group_videos[i : i + CHUNK_SIZE]
-            chunk_count += 1
+            chunk_jobs.append(
+                (len(chunk_jobs) + 1, group_name, group_videos[i : i + CHUNK_SIZE])
+            )
+    chunk_count = len(chunk_jobs)
+
+    sem = asyncio.Semaphore(BATCH_CHUNK_CONCURRENCY)
+
+    async def _run_one(idx: int, group_name: str, chunk: List[Dict]) -> Optional[Tuple[Dict, float]]:
+        async with sem:
             logger.info(
-                "Processing chunk %d: %s (%d videos)",
-                chunk_count, group_name, len(chunk),
+                "Processing chunk %d/%d: %s (%d videos)",
+                idx, chunk_count, group_name, len(chunk),
             )
             try:
-                result, cost = await _process_chunk(group_name, chunk)
-                total_gemini_cost += cost
-                all_chunk_results.append(result)
+                return await _process_chunk(group_name, chunk)
             except Exception:
-                logger.exception("Chunk %d failed (%s)", chunk_count, group_name)
+                logger.exception("Chunk %d failed (%s)", idx, group_name)
+                return None
+
+    chunk_outcomes = await asyncio.gather(
+        *(_run_one(idx, g, c) for idx, g, c in chunk_jobs)
+    )
+
+    all_chunk_results: List[Dict] = []
+    for outcome in chunk_outcomes:
+        if outcome is None:
+            continue
+        result, cost = outcome
+        total_gemini_cost += cost
+        all_chunk_results.append(result)
 
     if not all_chunk_results:
         return {"error": "All chunk processing failed"}
